@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>구매 영수증 전송</title>
+  <style>
+    body { margin: 0; font: 16px system-ui, sans-serif; color: #14213a; background: #f1f5fa; }
+    main { max-width: 28rem; margin: 3rem auto; padding: 1.25rem; }
+    form { display: grid; gap: .9rem; background: white; padding: 1.25rem; border-radius: 1rem; }
+    label, button { border: 1px solid #b9cbe1; border-radius: .6rem; padding: .75rem; text-align: center; font: inherit; }
+    button { background: #1748a3; color: white; }
+    button:disabled { opacity: .5; }
+    label:focus-within { outline: 2px solid #1748a3; }
+    input[type=file] { width: 1px; height: 1px; opacity: 0; position: absolute; }
+    #selection, #results { overflow-wrap: anywhere; }
+    #selection li, #results li { margin: .4rem 0; }
+    #selection button { margin-left: .5rem; padding: .15rem .4rem; background: white; color: #14213a; }
+  </style>
+  <script src="/upload.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>구매 영수증 전송</h1>
+    <p>영수증 사진을 고르거나 여러 장을 차례로 찍어 PC로 보냅니다.</p>
+    <form>
+      <label>카메라로 촬영<input id="camera" type="file" accept="image/*" capture="environment"></label>
+      <label>사진에서 여러 장 선택<input id="gallery" type="file" accept="image/*" multiple></label>
+      <p id="selection-count">선택한 사진이 없습니다.</p>
+      <ul id="selection" hidden></ul>
+      <button type="submit" disabled>PC로 전송</button>
+    </form>
+    <p id="status" role="status"></p>
+    <ul id="results" hidden></ul>
+  </main>
+</body>
+</html>

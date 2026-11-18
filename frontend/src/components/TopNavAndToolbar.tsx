@@ -10,7 +10,6 @@ const NAV_ITEMS: { id: AppTab; label: string }[] = [
   { id: 'news-sns', label: '뉴스·SNS' },
   { id: 'doc-ai', label: 'AI 문서' },
   { id: 'finance', label: '금융 분석' },
-  { id: 'receipt-ocr', label: '영수증 OCR' },
   { id: 'dataops', label: '운영 콘솔' },
 ];
 
@@ -27,7 +26,15 @@ const REGIME_OPTIONS: { id: MarketRegime; label: string }[] = [
   { id: 'MACRO_TIGHTENING', label: '금리 · 환율 경계' },
 ];
 
-export const TopNavAndToolbar: React.FC = () => {
+function ReviewCount({ count }: { count: number | null }) {
+  return count === null ? null : (
+    <span className="ml-1.5 rounded-full bg-blue-50 px-1.5 py-0.5 text-xs font-semibold text-blue-800" aria-label={`검토 대기 ${count}건`}>
+      {count}
+    </span>
+  );
+}
+
+export const TopNavAndToolbar: React.FC<{ reviewCount: number | null }> = ({ reviewCount }) => {
   const {
     activeTab,
     setActiveTab,
@@ -74,7 +81,7 @@ export const TopNavAndToolbar: React.FC = () => {
                     : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
                 }`}
               >
-                {item.label}
+                {item.label}{item.id === 'doc-ai' && <ReviewCount count={reviewCount} />}
               </button>
             );
           })}
@@ -135,7 +142,7 @@ export const TopNavAndToolbar: React.FC = () => {
                   : 'bg-slate-100 text-slate-700'
               }`}
             >
-              {item.label}
+              {item.label}{item.id === 'doc-ai' && <ReviewCount count={reviewCount} />}
             </button>
           ))}
         </div>
