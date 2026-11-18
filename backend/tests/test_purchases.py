@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from PIL import Image
+import pymupdf
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -14,6 +15,32 @@ from app.features.purchases import router as purchases
 from app.features.purchases import mobile
 from app.features.purchases.extraction import Extraction, parse_fields
 from app.main import app
+
+
+STATEMENT_TEXT = """거래명세서
+공급자 상호: 가상상사
+작성일자: 2026-11-18
+명세서 번호: DEMO-42
+품목명   수량    단가     금액
+복사용지   2    12,000    24,000
+절연 케이블   1.5    4,000    6,000
+합계금액: 30,000원
+"""
+
+
+def test_statement_extracts_multiple_item_rows():
+    document_type, fields = parse_fields("statement", STATEMENT_TEXT)
+    assert document_type == "trade_statement"
+    assert fields["vendor"] == "가상상사"
+    assert fields["statement_number"] == "DEMO-42"
+    assert fields["total_amount"] == 30_000
+    assert fields["items"] == [
+        {"name": "복사용지", "quantity": 2, "unit_price": 12_000},
+        {"name": "절연 케이블", "quantity": 1.5, "unit_price": 4_000},
+    ]
+    single_space = "거래명세표\n품목명 수량 단가 금액\n절연 케이블 1.5 4000 6000"
+    assert parse_fields("statement", single_space)[1]["items"] == [fields["items"][1]]
+    assert parse_fields("statement", "전자세금계산서")[0] == "unknown"
 
 
 def test_receipt_reads_unlabeled_merchant_from_header():
@@ -262,3 +289,34 @@ def test_mobile_qr_batch_saves_valid_photos_and_reports_failed_and_duplicate_fil
         assert delivery["items"][0]["record_id"] != delivery["items"][2]["record_id"]
         assert client.get("/api/v1/receipts/review-count").json() == {"count": 2}
         assert phone.post("/upload-batch", headers=headers, files=files).status_code == 410
+
+
+def test_statement_review_and_excel_preserve_item_rows(client, monkeypatch):
+    monkeypatch.setattr(purchases, "extract", lambda *_: Extraction(STATEMENT_TEXT, "pdf_text"))
+    with pymupdf.open() as pdf:
+        pdf.new_page()
+        content = pdf.tobytes()
+    prefix = "/api/v1/statements"
+    uploaded = client.post(f"{prefix}/uploads?filename=statement.pdf", content=content).json()["record"]
+    assert uploaded["kind"] == "statement"
+    assert uploaded["document_type"] == "trade_statement"
+    assert len(uploaded["fields"]["items"]) == 2
+    path = f"{prefix}/{uploaded['id']}"
+    assert client.get(f"{path}/preview/1").headers["content-type"] == "image/png"
+
+    draft = uploaded["fields"]
+    draft["items"][1]["unit_price"] = None
+    assert client.put(f"{path}/draft", json={"fields": draft}).status_code == 200
+    assert client.get(path).json()["fields"]["items"][1]["unit_price"] is None
+    body = {"document_type": "trade_statement", "fields": draft}
+    assert client.post(f"{path}/approve", json=body).status_code == 422
+    draft["items"][1]["unit_price"] = 4_100.5
+    assert client.post(f"{path}/approve", json=body).status_code == 200
+    history = client.get("/api/v1/documents/history?document_type=trade_statement&status=approved").json()
+    assert len(history) == 1 and history[0]["id"] == uploaded["id"]
+    workbook = load_workbook(BytesIO(client.get("/api/v1/documents/export?document_type=trade_statement").content))
+    worksheet = workbook["거래명세서 품목"]
+    assert worksheet["G3"].value == "절연 케이블"
+    assert worksheet["H3"].value == 1.5
+    assert worksheet["I3"].value == 4_100.5
+    assert worksheet["I3"].data_type == "n"

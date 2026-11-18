@@ -114,7 +114,7 @@ def read_pdf(content):
 
 def extract(kind, content):
     try:
-        if kind == "document":
+        if kind != "receipt":
             result = read_pdf(content)
         else:
             with Image.open(BytesIO(content)) as image:
@@ -243,9 +243,82 @@ def receipt_vendor(text):
     return names[0] if len(names) == 1 else ""
 
 
+STATEMENT_COLUMNS = {
+    "품목": "name", "품목명": "name", "품명": "name", "상품명": "name",
+    "수량": "quantity", "단가": "unit_price", "공급단가": "unit_price",
+    "금액": "amount", "공급가액": "amount", "합계금액": "amount",
+    "규격": "spec", "단위": "unit", "번호": "number", "순번": "number", "NO": "number", "비고": "note",
+}
+STATEMENT_NUMBER_PATTERN = r"-?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]{1,12})(?:\.[0-9]{1,4})?"
+STATEMENT_ITEM_LIMIT = 200
+
+
+def statement_number(value, unit):
+    match = re.fullmatch(rf"({STATEMENT_NUMBER_PATTERN})(?:\s*(?:{unit}))?", value.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    digits = match.group(1).replace(",", "")
+    parsed = float(digits) if "." in digits else int(digits)
+    return parsed if abs(parsed) <= 999_999_999_999 else None
+
+
+def statement_items(text):
+    items = []
+    columns = []
+    for raw in text.splitlines():
+        line = raw.strip().strip("|").strip()
+        if not line:
+            continue
+        if re.match(r"^(?:합\s*계|총\s*(?:계|액|금액)|소\s*계)(?=\s|:|금액|$)", line):
+            columns = []
+            continue
+        cells = re.split(r"\s*\|\s*|\t+| {2,}", line)
+        header_parts = cells if len(cells) > 1 else line.split()
+        header = [STATEMENT_COLUMNS.get(re.sub(r"\s+", "", part).upper().strip(".:")) for part in header_parts]
+        if {"name", "quantity", "unit_price"} <= set(header):
+            columns = header
+            continue
+        if not columns:
+            continue
+
+        if len(cells) == 1 and columns in (["name", "quantity", "unit_price"], ["name", "quantity", "unit_price", "amount"]):
+            cells = line.rsplit(maxsplit=len(columns) - 1)
+        if len(cells) != len(columns):
+            continue
+        values = dict(zip(columns, cells))
+        name = values["name"].strip()
+        quantity = statement_number(values["quantity"], r"개|EA|PCS|SET|매|박스")
+        price = statement_number(values["unit_price"], r"원|KRW")
+        if name and len(name) <= 200 and (quantity is not None or price is not None):
+            items.append({"name": name, "quantity": quantity, "unit_price": price})
+            if len(items) >= STATEMENT_ITEM_LIMIT:
+                break
+    return items
+
+
+def parse_statement(text, supplier_text, money_labels):
+    if not re.search(r"거\s*래\s*명\s*세\s*[서표]", text):
+        return "unknown", {}
+    name_pattern = r"[^\n|]+?(?=[ \t]{2,}|[ \t]*\||$)"
+    vendor = labeled(text, r"공\s*급\s*자\s*상\s*호|거\s*래\s*처\s*명", name_pattern)
+    vendor = vendor or labeled(text, r"공\s*급\s*자[ \t]*[:：]", name_pattern)
+    if not vendor:
+        supplier = re.search(r"공\s*급\s*자(.*?)공\s*급\s*받\s*는\s*자", text, re.DOTALL)
+        vendor = labeled(supplier_text or (supplier.group(1) if supplier else ""), r"상\s*호", name_pattern)
+    return "trade_statement", {
+        "vendor": vendor,
+        "transaction_date": date_value(text, r"작\s*성\s*(?:일\s*자|일)|거\s*래\s*일\s*자|발\s*행\s*일\s*자"),
+        "statement_number": labeled(text, r"(?:거\s*래\s*)?명\s*세\s*(?:서\s*)?번\s*호|문\s*서\s*번\s*호", r"[A-Za-z0-9][A-Za-z0-9._/-]{0,63}"),
+        "total_amount": amount(text, money_labels),
+        "items": statement_items(text),
+    }
+
+
 def parse_fields(kind, raw, supplier_text=""):
     text = unicodedata.normalize("NFKC", raw)
     money_labels = r"합\s*계\s*(?:금\s*액)?|총\s*금\s*액"
+    if kind == "statement":
+        return parse_statement(text, unicodedata.normalize("NFKC", supplier_text), money_labels)
     if kind == "receipt":
         return "receipt", {
             "vendor": receipt_vendor(text),

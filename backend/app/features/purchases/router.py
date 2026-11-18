@@ -18,7 +18,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import defer
 
 from app.db import Base, Session, engine
-from .extraction import extract, parse_fields, pdf_preview, receipt_vendor, supplier_business_number, validate_file
+from .extraction import (
+    STATEMENT_ITEM_LIMIT, extract, parse_fields, pdf_preview, receipt_vendor, supplier_business_number, validate_file,
+)
 from .model import PurchaseRecord
 
 MAX_BYTES = 10 * 1024 * 1024
@@ -34,11 +36,14 @@ FIELD_LABELS = {
     "tax_amount": "세액",
     "total_amount": "합계금액",
 }
-TYPE_LABELS = {"receipt": "영수증", "tax_invoice": "매입 세금계산서", "unknown": "유형 확인 필요"}
+TYPE_LABELS = {
+    "receipt": "영수증", "tax_invoice": "매입 세금계산서",
+    "trade_statement": "거래명세서", "unknown": "유형 확인 필요",
+}
 STATUS_LABELS = {"review": "검토 대기", "approved": "승인 완료", "trashed": "휴지통"}
 ActiveStatus = Literal["review", "approved"]
 Status = Literal["review", "approved", "trashed"]
-DocumentType = Literal["receipt", "tax_invoice", "unknown"]
+DocumentType = Literal["receipt", "tax_invoice", "trade_statement", "unknown"]
 
 
 class ReceiptFields(BaseModel):
@@ -59,13 +64,41 @@ class InvoiceFields(ReceiptFields):
     total_amount: int = Field(strict=True, ge=-999_999_999_999, le=999_999_999_999)
 
 
+class DraftStatementItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(max_length=200)
+    quantity: float | None = Field(strict=True, ge=-999_999_999_999, le=999_999_999_999)
+    unit_price: float | None = Field(strict=True, ge=-999_999_999_999, le=999_999_999_999)
+
+
+class StatementItem(DraftStatementItem):
+    name: str = Field(min_length=1, max_length=200)
+    quantity: float = Field(strict=True, ge=-999_999_999_999, le=999_999_999_999)
+    unit_price: float = Field(strict=True, ge=-999_999_999_999, le=999_999_999_999)
+
+
+class StatementFields(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    vendor: str = Field(min_length=1, max_length=200)
+    transaction_date: str = Field(min_length=10, max_length=10)
+    statement_number: str = Field(default="", max_length=64)
+    total_amount: int | None = Field(default=None, strict=True, ge=-999_999_999_999, le=999_999_999_999)
+    items: list[StatementItem] = Field(min_length=1, max_length=STATEMENT_ITEM_LIMIT)
+
+
+FIELDS_BY_KIND = {"receipt": ReceiptFields, "document": InvoiceFields, "statement": StatementFields}
+TYPE_BY_KIND = {"receipt": "receipt", "document": "tax_invoice", "statement": "trade_statement"}
+
+
 class Approval(BaseModel):
     fields: dict
     document_type: DocumentType
 
 
 class Draft(BaseModel):
-    fields: dict[str, str | StrictInt | None]
+    fields: dict[str, str | StrictInt | list[DraftStatementItem] | None]
     confirmed_type: bool = False
 
 
@@ -82,6 +115,7 @@ def serialize(row, full=False):
         "id": row.id,
         "filename": row.filename,
         "media_type": row.media_type,
+        "kind": row.kind,
         "document_type": row.document_type,
         "status": row.status,
         "fields": row.fields,
@@ -172,14 +206,16 @@ def store_upload(kind, filename, content):
 
 
 def validated_fields(kind, body):
-    required_type = "receipt" if kind == "receipt" else "tax_invoice"
-    if body.document_type != required_type:
+    if body.document_type != TYPE_BY_KIND[kind]:
         raise HTTPException(422, "원본을 보고 문서 유형을 확인해 주세요.")
     try:
-        schema = ReceiptFields if kind == "receipt" else InvoiceFields
-        values = schema.model_validate(body.fields).model_dump()
+        values = FIELDS_BY_KIND[kind].model_validate(body.fields).model_dump()
     except ValidationError as exc:
-        labels = [FIELD_LABELS.get(error["loc"][0], "입력값") for error in exc.errors()]
+        extra_labels = {"items": "품목별 품목명·수량·단가", "statement_number": "명세서 번호"}
+        labels = dict.fromkeys(
+            extra_labels.get(error["loc"][0], FIELD_LABELS.get(error["loc"][0], "입력값"))
+            for error in exc.errors()
+        )
         raise HTTPException(422, f"필수 항목 또는 입력 형식을 확인해 주세요. ({', '.join(labels)})") from exc
     raw_date = values["transaction_date"]
     try:
@@ -192,15 +228,18 @@ def validated_fields(kind, body):
     except ValueError as exc:
         raise HTTPException(422, "거래일시 또는 작성일자 형식을 확인해 주세요.") from exc
 
-    approval = re.sub(r"[- ]", "", values["approval_number"])
-    if kind == "receipt":
-        vendor = re.sub(r"\s+", "", unicodedata.normalize("NFKC", values["vendor"])).casefold()
-        key = f"{vendor}|{raw_date[:10]}|{approval}"
-    else:
+    if kind == "document":
         if values["supply_amount"] + values["tax_amount"] != values["total_amount"]:
             raise HTTPException(422, "공급가액과 세액의 합이 합계금액과 일치해야 합니다.")
         values["business_number"] = values["business_number"].replace("-", "")
-        key = approval
+        key = re.sub(r"[- ]", "", values["approval_number"])
+    else:
+        number = values["approval_number"] if kind == "receipt" else values["statement_number"]
+        if not number:
+            return values, None
+        vendor = re.sub(r"\s+", "", unicodedata.normalize("NFKC", values["vendor"])).casefold()
+        number = re.sub(r"\s+", "", unicodedata.normalize("NFKC", number)).casefold()
+        key = f"{vendor}|{raw_date[:10]}|{number}"
     return values, sha256(key.encode("utf-8")).hexdigest()
 
 
@@ -227,24 +266,42 @@ def spreadsheet(rows):
     book = Workbook()
     sheet = book.active
     sheet.title = "구매 증빙 처리 이력"
-    sheet.append(["문서 유형", "처리 상태", "원본 파일", *FIELD_LABELS.values(), "등록일시 (KST)", "승인일시 (KST)"])
-    sheet.freeze_panes = "D2"
+    sheet.append(["문서 유형", "처리 상태", "원본 파일", *FIELD_LABELS.values(),
+                  "등록일시 (KST)", "승인일시 (KST)", "명세서 번호"])
+    details = None
     for row in rows:
         values = [
             TYPE_LABELS[row.document_type], STATUS_LABELS[row.status], row.filename,
             *(row.fields.get(field) for field in FIELD_LABELS), row.created_at, row.approved_at,
+            row.fields.get("statement_number"),
         ]
-        sheet.append(values)
-        for cell in sheet[sheet.max_row]:
-            if isinstance(cell.value, str):
-                cell.data_type = "s"
-    sheet.auto_filter.ref = sheet.dimensions
-    for column in sheet.columns:
-        column[0].font = Font(bold=True)
-        sheet.column_dimensions[column[0].column_letter].width = 23
+        append_spreadsheet_row(sheet, values)
+        if row.kind == "statement" and row.fields.get("items"):
+            if details is None:
+                details = book.create_sheet("거래명세서 품목")
+                details.append(["기록 ID", "원본 파일", "명세서 번호", "거래처", "작성일자",
+                                "품목 순서", "품목명", "수량", "단가"])
+            for index, item in enumerate(row.fields["items"], start=1):
+                append_spreadsheet_row(details, [
+                    row.id, row.filename, row.fields.get("statement_number"), row.fields.get("vendor"),
+                    row.fields.get("transaction_date"), index, item["name"], item["quantity"], item["unit_price"],
+                ])
+    for worksheet in book:
+        worksheet.freeze_panes = "D2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        for column in worksheet.columns:
+            column[0].font = Font(bold=True)
+            worksheet.column_dimensions[column[0].column_letter].width = 23
     output = BytesIO()
     book.save(output)
     return output.getvalue()
+
+
+def append_spreadsheet_row(sheet, values):
+    sheet.append(values)
+    for cell in sheet[sheet.max_row]:
+        if isinstance(cell.value, str):
+            cell.data_type = "s"
 
 
 def clean_upload_filename(filename: str):
@@ -335,13 +392,16 @@ def attach_routes(router: APIRouter, kind: str):
 
     @router.put("/{record_id}/draft")
     def save_draft(record_id: str, body: Draft):
-        schema = ReceiptFields if kind == "receipt" else InvoiceFields
-        expected = schema.model_fields.keys()
+        expected = FIELDS_BY_KIND[kind].model_fields.keys()
         if body.fields.keys() != expected:
             raise HTTPException(422, "문서 유형의 임시저장 항목을 확인해 주세요.")
         fields = {}
         for name, value in body.fields.items():
-            if name.endswith("_amount"):
+            if name == "items":
+                if not isinstance(value, list) or len(value) > STATEMENT_ITEM_LIMIT:
+                    raise HTTPException(422, f"품목은 최대 {STATEMENT_ITEM_LIMIT}개까지 저장할 수 있습니다.")
+                value = [item.model_dump() for item in value]
+            elif name.endswith("_amount"):
                 if value is not None and (type(value) is not int or abs(value) > 999_999_999_999):
                     raise HTTPException(422, "금액은 원 단위 정수로 입력해 주세요.")
             elif not isinstance(value, str) or len(value) > ({"vendor": 200, "item_summary": 500}.get(name, 64)):
@@ -387,10 +447,13 @@ def attach_routes(router: APIRouter, kind: str):
                 db.commit()
             except IntegrityError:
                 db.rollback()
+                if key is None:
+                    raise
                 existing = db.scalar(record_query(kind).where(PurchaseRecord.approval_key == key))
                 if existing is None:
                     raise
-                raise HTTPException(409, {"message": "같은 승인번호가 등록된 기록이 있습니다.", "id": existing.id})
+                label = "명세서 번호" if kind == "statement" else "승인번호"
+                raise HTTPException(409, {"message": f"같은 {label}가 등록된 기록이 있습니다.", "id": existing.id})
             db.expire_all()
             row = get_record(db, kind, record_id)
             if row.status != "approved":

@@ -3,14 +3,22 @@ import type { FormEvent, MouseEvent, ReactNode } from 'react';
 import { apiUrl, downloadWorkbook, request } from '../services/api.js';
 import { MobileReceiptUpload } from './MobileReceiptUpload';
 
-type DocumentType = 'receipt' | 'tax_invoice' | 'unknown';
+type DocumentType = 'receipt' | 'tax_invoice' | 'trade_statement' | 'unknown';
 type Status = 'review' | 'approved' | 'trashed';
-type Fields = Record<string, string | number | null>;
-type FieldSpec = { name: string; label: string; format?: 'amount' | 'date' | 'datetime-local' };
-type PurchaseKind = 'document' | 'receipt';
+type StatementItem = { name: string; quantity: number | null; unit_price: number | null };
+type StatementItemDraft = { key: number; name: string; quantity: string; unit_price: string };
+type Fields = {
+  vendor?: string;
+  total_amount?: number | null;
+  items?: StatementItem[];
+  [name: string]: string | number | StatementItem[] | null | undefined;
+};
+type FieldSpec = { name: string; label: string; format?: 'amount' | 'date' | 'datetime-local'; optional?: boolean };
+type PurchaseKind = 'document' | 'receipt' | 'statement';
 type RecordSummary = {
   id: string;
   filename: string;
+  kind: PurchaseKind;
   document_type: DocumentType;
   status: Status;
   fields: Fields;
@@ -27,6 +35,7 @@ type Filters = { start: string; end: string; vendor: string; document_type: stri
 const typeLabels = {
   receipt: '영수증',
   tax_invoice: '매입 세금계산서',
+  trade_statement: '거래명세서',
   unknown: '유형 확인 필요',
 };
 const statusLabels = { review: '검토 대기', approved: '승인 완료', trashed: '휴지통' };
@@ -45,16 +54,22 @@ function recordPath(row: RecordSummary) {
 }
 
 function recordKind(row: RecordSummary): PurchaseKind {
-  return row.document_type === 'receipt' ? 'receipt' : 'document';
+  return row.kind;
 }
 
+const endpoints: Record<PurchaseKind, string> = { document: 'documents', receipt: 'receipts', statement: 'statements' };
+const documentTypes: Record<PurchaseKind, DocumentType> = {
+  document: 'tax_invoice', receipt: 'receipt', statement: 'trade_statement',
+};
+
 function purchaseApi(kind: PurchaseKind) {
-  return `/api/v1/${kind === 'receipt' ? 'receipts' : 'documents'}`;
+  return `/api/v1/${endpoints[kind]}`;
 }
 
 const tabs = [
   { kind: 'document', label: '매입 세금계산서', format: 'PDF' },
   { kind: 'receipt', label: '구매 영수증', format: 'JPG·PNG' },
+  { kind: 'statement', label: '거래명세서', format: 'PDF' },
 ] as const;
 const historyApi = purchaseApi('document');
 
@@ -73,7 +88,24 @@ type Review = {
   draft: Record<string, string>;
   page: number;
   confirmedType: boolean;
+  items: StatementItemDraft[];
 };
+
+const statementItemLimit = 200;
+let nextStatementItemKey = 0;
+
+function itemDraft(item?: StatementItem): StatementItemDraft {
+  return {
+    key: nextStatementItemKey++,
+    name: item?.name ?? '',
+    quantity: String(item?.quantity ?? ''),
+    unit_price: String(item?.unit_price ?? ''),
+  };
+}
+
+function draftNumber(value: string) {
+  return value.trim() ? Number(value) : null;
+}
 
 type UploadItem =
   | { filename: string; state: 'waiting' | 'uploading' }
@@ -109,11 +141,11 @@ export function PurchaseReviewView({
   const [reviews, setReviews] = useState<Record<string, Review>>({});
   const [selected, setSelected] = useState<Partial<Record<PurchaseKind, string>>>({});
   const selectedId = selected[kind];
-  const { record, draft = {}, page = 1, confirmedType } = (selectedId && reviews[selectedId]) || {};
+  const { record, draft = {}, page = 1, confirmedType, items = [] } = (selectedId && reviews[selectedId]) || {};
   const [batches, setBatches] = useState<Partial<Record<PurchaseKind, UploadItem[]>>>({});
   const batch = batches[kind] ?? [];
   const batchRequest = useRef<AbortController | null>(null);
-  const recordSpecs = kind === 'receipt' ? receiptFields : invoiceFields;
+  const recordSpecs = fieldSpecs[kind];
   const initialHistoryFilters = {
     ...initialFilters,
     status: initialStatus === 'review' || initialStatus === 'trashed' ? initialStatus : 'approved',
@@ -166,6 +198,7 @@ export function PurchaseReviewView({
 
   function show(next: RecordDetail, select = true, preserveDraft = false) {
     const nextKind = recordKind(next);
+    const incomingItems = nextKind === 'statement' ? (next.fields.items?.length ? next.fields.items.map(itemDraft) : [itemDraft()]) : [];
     setReviews((current) => {
       const previous = current[next.id];
       if (preserveDraft && previous?.record.status === next.status
@@ -174,9 +207,10 @@ export function PurchaseReviewView({
       }
       return { ...current, [next.id]: {
         record: next,
-        draft: Object.fromEntries(Object.entries(next.fields).map(([name, value]) => [name, String(value ?? '')])),
+        draft: Object.fromEntries(fieldSpecs[nextKind].map(({ name }) => [name, String(next.fields[name] ?? '')])),
         page: 1,
         confirmedType: next.confirmed_type,
+        items: incomingItems,
       } };
     });
     if (select) {
@@ -277,16 +311,21 @@ export function PurchaseReviewView({
     setError('');
     setNotice('');
     setConflictId('');
-    const fields = Object.fromEntries(recordSpecs.map(({ name, format }) => {
+    const fields: Record<string, string | number | null | StatementItem[]> = Object.fromEntries(recordSpecs.map(({ name, format }) => {
       const value = (draft[name] ?? '').trim();
-      return [name, format === 'amount' ? (value ? Number(value) : null) : value];
+      return [name, format === 'amount' ? draftNumber(value) : value];
     }));
+    if (kind === 'statement') {
+      fields.items = items.map(({ name, quantity, unit_price }) => ({
+        name: name.trim(), quantity: draftNumber(quantity), unit_price: draftNumber(unit_price),
+      }));
+    }
     try {
       const saved = await request(`${recordPath(record)}/${approve ? 'approve' : 'draft'}`, {
         method: approve ? 'POST' : 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(approve
-          ? { fields, document_type: kind === 'receipt' ? 'receipt' : 'tax_invoice' }
+          ? { fields, document_type: documentTypes[kind] }
           : { fields, confirmed_type: confirmedType }),
       });
       show(saved);
@@ -355,6 +394,8 @@ export function PurchaseReviewView({
   }
 
   const original = record ? apiUrl(`${recordPath(record)}/original`) : '';
+  const missingRequired = recordSpecs.some(({ name, optional }) => !optional && !(draft[name] ?? '').trim())
+    || (kind === 'statement' && items.some(({ name, quantity, unit_price }) => !name.trim() || !quantity || !unit_price));
 
   return (
     <section className="space-y-6">
@@ -390,7 +431,8 @@ export function PurchaseReviewView({
         </div>
         <section className="rounded-xl border border-slate-200 bg-white p-5">
           <label className="block text-sm font-semibold" htmlFor="purchase-upload">
-            {kind === 'receipt' ? '영수증 이미지 (JPG·PNG, 파일당 10 MB 이하)' : '매입 세금계산서 PDF (파일당 12쪽·10 MB 이하)'}
+            {kind === 'receipt' ? '영수증 이미지 (JPG·PNG, 파일당 10 MB 이하)'
+              : `${typeLabels[documentTypes[kind]]} PDF (파일당 12쪽·10 MB 이하)`}
           </label>
           <input id="purchase-upload" className="mt-3 block max-w-full text-sm" type="file" multiple
             accept={kind === 'receipt' ? '.jpg,.jpeg,.png' : '.pdf'} disabled={busy}
@@ -558,7 +600,7 @@ export function PurchaseReviewView({
               {record.document_type === 'receipt'
                 ? <img className="max-h-[680px] w-full object-contain" src={original} alt="업로드한 영수증 원본" />
                 : <>
-                    <img className="max-h-[680px] w-full object-contain" alt={`세금계산서 PDF 원본 ${page}쪽`}
+                    <img className="max-h-[680px] w-full object-contain" alt={`${kind === 'statement' ? '거래명세서' : '세금계산서'} PDF 원본 ${page}쪽`}
                       src={apiUrl(`${recordPath(record)}/preview/${page}`)} />
                     {record.page_count > 1 && (
                       <div className="mt-3 flex items-center justify-between gap-2 text-sm">
@@ -585,24 +627,28 @@ export function PurchaseReviewView({
                 {record.document_type === 'unknown' && (
                   <label className="flex items-center gap-2 text-sm font-medium">
                     <input type="checkbox" checked={confirmedType} disabled={record.status !== 'review' || busy} onChange={(event) => updateReview({ confirmedType: event.target.checked })} />
-                    원본이 매입 세금계산서임을 확인했습니다
+                    원본이 {typeLabels[documentTypes[kind]]}임을 확인했습니다
                   </label>
                 )}
                 <fieldset className="grid gap-3 sm:grid-cols-2" disabled={record.status !== 'review' || busy}>
-                  {recordSpecs.map(({ name, label, format }) => (
+                  {recordSpecs.map(({ name, label, format, optional }) => (
                     <label key={name} className="space-y-1 text-sm font-medium">
                       <span>{label}</span>
                       <input className={control} value={draft[name] ?? ''} name={name}
                         type={format === 'amount' ? 'number' : format === 'date' ? 'date' : 'text'}
                         placeholder={format === 'datetime-local' ? 'YYYY-MM-DD HH:MM' : undefined}
-                        required={name !== 'item_summary'}
+                        required={!optional}
                         onChange={(event) => updateReview({ draft: { ...draft, [name]: event.target.value } })} />
                     </label>
                   ))}
                 </fieldset>
+                {kind === 'statement' && (
+                  <StatementItems items={items} readOnly={record.status !== 'review'} busy={busy}
+                    onChange={(nextItems) => updateReview({ items: nextItems })} />
+                )}
                 {record.status === 'review' && (
                   <>
-                    {recordSpecs.some(({ name }) => !(draft[name] ?? '').trim()) &&
+                    {missingRequired &&
                       <p className="text-sm text-amber-900">빈 항목은 원본에서 확인해 입력해 주세요.</p>}
                     <div className="flex flex-wrap items-center gap-2">
                       <button className={primary} type="submit" disabled={busy || !confirmedType}>승인 및 저장</button>
@@ -634,8 +680,57 @@ const invoiceFields: FieldSpec[] = [
   { name: 'business_number', label: '공급자 사업자등록번호' },
   { name: 'transaction_date', label: '작성일자', format: 'date' },
   { name: 'approval_number', label: '세금계산서 승인번호' },
-  { name: 'item_summary', label: '품목 요약' },
+  { name: 'item_summary', label: '품목 요약', optional: true },
   { name: 'supply_amount', label: '공급가액 (원)', format: 'amount' },
   { name: 'tax_amount', label: '세액 (원)', format: 'amount' },
   { name: 'total_amount', label: '합계금액 (원)', format: 'amount' },
 ];
+
+const fieldSpecs: Record<PurchaseKind, FieldSpec[]> = {
+  document: invoiceFields,
+  receipt: receiptFields,
+  statement: [
+    { name: 'vendor', label: '거래처명' },
+    { name: 'transaction_date', label: '작성일자', format: 'date' },
+    { name: 'statement_number', label: '명세서 번호 (선택)', optional: true },
+    { name: 'total_amount', label: '합계금액 (원, 선택)', format: 'amount', optional: true },
+  ],
+};
+
+function StatementItems({ items, readOnly, busy, onChange }: {
+  items: StatementItemDraft[];
+  readOnly: boolean;
+  busy: boolean;
+  onChange: (items: StatementItemDraft[]) => void;
+}) {
+  return (
+    <fieldset className="space-y-2 rounded-lg border border-slate-200 p-3" disabled={readOnly || busy}>
+      <legend className="px-1 text-sm font-semibold">품목별 수량과 단가</legend>
+      {items.map((item, index) => (
+        <div key={item.key} className="grid items-end gap-2 border-b border-slate-100 pb-2 sm:grid-cols-[2fr_1fr_1fr_auto]">
+          {([
+            ['name', '품목명'],
+            ['quantity', '수량'],
+            ['unit_price', '단가 (원)'],
+          ] as const).map(([name, label]) => (
+            <label key={name} className="space-y-1 text-sm">
+              <span>{label}</span>
+              <input className={control} aria-label={`${index + 1}번 품목 ${label}`}
+                type={name === 'name' ? 'text' : 'number'} step={name === 'name' ? undefined : 'any'}
+                maxLength={name === 'name' ? 200 : undefined} value={item[name]} required
+                onChange={(event) => onChange(items.map((row) => row.key === item.key ? { ...row, [name]: event.target.value } : row))} />
+            </label>
+          ))}
+          {!readOnly && (
+            <button className={secondary} type="button" aria-label={`${index + 1}번 품목 삭제`} disabled={items.length === 1}
+              onClick={() => onChange(items.filter((row) => row.key !== item.key))}>삭제</button>
+          )}
+        </div>
+      ))}
+      {!readOnly && (
+        <button className={secondary} type="button" disabled={items.length >= statementItemLimit}
+          onClick={() => onChange([...items, itemDraft()])}>품목 추가</button>
+      )}
+    </fieldset>
+  );
+}
