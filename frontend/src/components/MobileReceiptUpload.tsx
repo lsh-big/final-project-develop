@@ -74,7 +74,7 @@ export function MobileReceiptUpload({ disabled, onReceived, onOpen }: {
   return (
     <div className="mt-4 space-y-3">
       {!active && (
-        <button type="button" className={button} disabled={disabled || creating} onClick={() => void start()}>
+        <button type="button" className={`${button} min-h-11 w-full sm:w-auto`} disabled={disabled || creating} onClick={() => void start()}>
           {creating ? 'QR 만드는 중…' : '휴대폰으로 올리기'}
         </button>
       )}

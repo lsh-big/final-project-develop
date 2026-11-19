@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
   ANALYST_AVATAR_URL,
   INITIAL_AIRFLOW_DAGS,
@@ -127,7 +127,21 @@ function fullDateTime(): string {
 }
 
 export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [activeTab, setActiveTab] = useState<AppTab>('news-sns');
+  const [activeTab, setActiveTabState] = useState(readActiveTab);
+  useEffect(() => {
+    const syncActiveTab = () => setActiveTabState(readActiveTab());
+    window.addEventListener('popstate', syncActiveTab);
+    return () => window.removeEventListener('popstate', syncActiveTab);
+  }, []);
+
+  const setActiveTab = useCallback((tab: AppTab) => {
+    if (tab !== readActiveTab()) {
+      const url = new URL(window.location.href);
+      url.searchParams.set('tab', tab);
+      window.history.pushState(null, '', url);
+    }
+    setActiveTabState(tab);
+  }, []);
   const [users, setUsers] = useState<UserAccount[]>(INITIAL_USERS);
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(INITIAL_USERS[0]);
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -800,6 +814,19 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   return <PlatformContext.Provider value={value}>{children}</PlatformContext.Provider>;
 };
+
+function readActiveTab(): AppTab {
+  const tab = new URLSearchParams(window.location.search).get('tab');
+  switch (tab) {
+    case 'dashboard':
+    case 'doc-ai':
+    case 'finance':
+    case 'dataops':
+      return tab;
+    default:
+      return 'news-sns';
+  }
+}
 
 export function usePlatform(): PlatformContextValue {
   const ctx = useContext(PlatformContext);

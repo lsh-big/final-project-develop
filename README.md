@@ -33,6 +33,18 @@ API 문서: http://127.0.0.1:8001/docs
 - pipelines/: Airflow DAG, ETL 작업, 테스트(별도 Python 환경)
 - models/, data/: 로컬 모델·데이터 저장 위치
 - migrations/: Alembic 초기화 및 DB 변경 파일을 추가할 위치
+
+### 구매 증빙 대조와 DB 적용
+
+백엔드를 시작하면 기존 DB에 `purchase_links`와 `purchase_file_claims` 테이블을 추가합니다. 기존 구매 증빙 레코드는 그대로 사용할 수 있습니다. 배포 전에 적용하려면 기존 `DATABASE_URL`을 설정한 환경에서 `backend` 디렉터리로 이동하여 아래 명령을 실행합니다. DB 계정에는 테이블 생성 권한이 필요합니다.
+
+```powershell
+python -c "from app.features.purchases.router import init_db; init_db()"
+```
+
+**AI 문서**에서 매입 세금계산서와 거래명세서를 불러온 뒤, 상세의 **증빙 대조**에서 후보와 금액을 확인하고 **연결 확정** 또는 **연결 해제**를 누릅니다. 후보 날짜 범위는 `backend/app/features/purchases/matching.py`의 `MATCH_DATE_WINDOW_DAYS`에서 조정합니다. 동일 파일이나 승인번호는 **기존 증빙 보기**로 열 수 있으며, 거래처·날짜·금액만 일치하면 별도 거래인지 확인한 뒤 등록할 수 있습니다.
+
+기본 SQLite DB를 사용하는 개인 PC 개발 서버에서 인증 연동 없이 조회하려면 `backend`에서 서버를 시작할 PowerShell에 **매입 단가 이력**은 `$env:AUTOFLOW_LOCAL_PRICE_HISTORY = '1'`, **미처리 증빙함**은 `$env:AUTOFLOW_LOCAL_PURCHASE_INBOX = '1'`을 설정합니다. `python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --no-proxy-headers`로 실행합니다. 확인 메모와 공유 서버에서는 사용자 및 증빙 접근 권한을 확인하는 기존 서버 연동을 사용합니다.
 - docs/: planning, design, implementation, deployment
 - .github/workflows/: 프런트엔드 빌드 및 Python 구문 검사 CI
 

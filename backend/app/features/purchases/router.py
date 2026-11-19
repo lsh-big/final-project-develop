@@ -13,15 +13,17 @@ from fastapi.responses import Response
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import defer
 
 from app.db import Base, Session, engine
 from .extraction import (
-    STATEMENT_ITEM_LIMIT, extract, parse_fields, pdf_preview, receipt_vendor, supplier_business_number, validate_file,
+    EXTRACTION_REVISION, STATEMENT_ITEM_LIMIT, extract, pdf_preview, receipt_vendor, recognize_upload, statement_delivery_date,
+    statement_tax_amounts, statement_vendor, supplier_business_number, validate_file,
 )
-from .model import PurchaseRecord
+from .matching import EvidenceMatches, MATCH_TYPES, evidence_date, registry_number, vendor_name
+from .model import PurchaseFileClaim, PurchaseLink, PurchaseRecord
 
 MAX_BYTES = 10 * 1024 * 1024
 KOREA_OFFSET = timedelta(hours=9)
@@ -56,7 +58,7 @@ class ReceiptFields(BaseModel):
 
 
 class InvoiceFields(ReceiptFields):
-    business_number: str = Field(pattern=r"^[0-9]{3}-?[0-9]{2}-?[0-9]{5}$")
+    business_number: str = Field(pattern=r"^[0-9]{3}[- ]*[0-9]{2}[- ]*[0-9]{5}$", max_length=32)
     approval_number: str = Field(pattern=r"^[0-9]{8}[- ]?[0-9]{8}[- ]?[0-9]{8}$")
     item_summary: str = Field(default="", max_length=500)
     supply_amount: int = Field(strict=True, ge=-999_999_999_999, le=999_999_999_999)
@@ -82,9 +84,12 @@ class StatementFields(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     vendor: str = Field(min_length=1, max_length=200)
+    business_number: str = Field(default="", pattern=r"^(?:[0-9]{3}[- ]*[0-9]{2}[- ]*[0-9]{5})?$", max_length=32)
     transaction_date: str = Field(min_length=10, max_length=10)
     statement_number: str = Field(default="", max_length=64)
     total_amount: int | None = Field(default=None, strict=True, ge=-999_999_999_999, le=999_999_999_999)
+    supply_amount: int | None = Field(default=None, strict=True, ge=-999_999_999_999, le=999_999_999_999)
+    tax_amount: int | None = Field(default=None, strict=True, ge=-999_999_999_999, le=999_999_999_999)
     items: list[StatementItem] = Field(min_length=1, max_length=STATEMENT_ITEM_LIMIT)
 
 
@@ -102,12 +107,36 @@ class Draft(BaseModel):
     confirmed_type: bool = False
 
 
+class LinkRequest(BaseModel):
+    candidate_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
 def init_db():
     Base.metadata.create_all(engine)
 
 
 def korea_now():
     return datetime.now(timezone.utc).replace(tzinfo=None) + KOREA_OFFSET
+
+
+def effective_fields(row):
+    fields = dict(row.fields)
+    text = row.extraction.get("text", "")
+    needs_fallback = row.status == "review" and not row.extraction.get("draft_saved_at")
+    if row.kind == "receipt" and needs_fallback and not fields.get("vendor"):
+        fields["vendor"] = receipt_vendor(text)
+    if row.document_type == "tax_invoice" and needs_fallback and not fields.get("business_number"):
+        fields["business_number"] = supplier_business_number(unicodedata.normalize("NFKC", text))
+    if row.document_type == "trade_statement":
+        text = unicodedata.normalize("NFKC", text)
+        if needs_fallback:
+            fields["vendor"] = statement_vendor(text) or fields.get("vendor", "")
+            fields["transaction_date"] = statement_delivery_date(text) or fields.get("transaction_date", "")
+        if "business_number" not in fields:
+            fields["business_number"] = supplier_business_number(text)
+        for field, value in statement_tax_amounts(text).items():
+            fields.setdefault(field, value)
+    return fields
 
 
 def serialize(row, full=False):
@@ -127,15 +156,7 @@ def serialize(row, full=False):
         result["page_count"] = row.extraction.get("page_count", 1)
         result["draft_saved_at"] = row.extraction.get("draft_saved_at")
         result["confirmed_type"] = row.document_type != "unknown" or row.extraction.get("confirmed_type", False)
-        needs_fallback = row.status == "review" and not result["draft_saved_at"]
-        if needs_fallback and row.kind == "receipt" and not row.fields.get("vendor"):
-            vendor = receipt_vendor(row.extraction["text"])
-            if vendor:
-                result["fields"] = {**row.fields, "vendor": vendor}
-        if needs_fallback and row.document_type == "tax_invoice" and not row.fields.get("business_number"):
-            business_number = supplier_business_number(unicodedata.normalize("NFKC", row.extraction["text"]))
-            if business_number:
-                result["fields"] = {**row.fields, "business_number": business_number}
+        result["fields"] = effective_fields(row)
     return result
 
 
@@ -155,12 +176,16 @@ def change_trash_status(kind, record_id, *, restore=False):
     allowed = ("trashed",) if restore else ("review", "approved")
     target = case((PurchaseRecord.approved_at.is_not(None), "approved"), else_="review") if restore else "trashed"
     with Session() as db:
-        db.execute(
+        changed = db.execute(
             update(PurchaseRecord)
             .where(PurchaseRecord.id == record_id, PurchaseRecord.kind == kind,
                    PurchaseRecord.status.in_(allowed))
             .values(status=target)
         )
+        if changed.rowcount and not restore:
+            db.execute(delete(PurchaseLink).where(
+                (PurchaseLink.invoice_id == record_id) | (PurchaseLink.statement_id == record_id)
+            ))
         db.commit()
         row = get_record(db, kind, record_id)
         valid_statuses = ("review", "approved") if restore else ("trashed",)
@@ -169,49 +194,155 @@ def change_trash_status(kind, record_id, *, restore=False):
         return serialize(row, full=True)
 
 
-def store_upload(kind, filename, content):
+def invoice_approval_key(value):
+    number = registry_number(value)
+    return sha256(number.encode("ascii")).hexdigest() if re.fullmatch(r"[0-9]{24}", number) else None
+
+
+def existing_invoice(db, key, exclude_id=None):
+    invoices = record_query("document")
+    if exclude_id:
+        invoices = invoices.where(PurchaseRecord.id != exclude_id)
+    existing = db.scalar(invoices.where(PurchaseRecord.approval_key == key))
+    if existing is not None:
+        return existing
+    # Older uploads only populated the unique approval key on approval.
+    for row in db.scalars(invoices.where(PurchaseRecord.approval_key.is_(None)).options(defer(PurchaseRecord.extraction))):
+        if invoice_approval_key(row.fields.get("approval_number")) == key:
+            return row
+    return None
+
+
+def suspected_duplicate(db, kind, fields):
+    vendor = vendor_name(fields.get("vendor"))
+    day = evidence_date(fields.get("transaction_date"))
+    total = fields.get("total_amount")
+    if not vendor or day is None or type(total) is not int:
+        return None
+    rows = db.execute(select(PurchaseRecord.id, PurchaseRecord.fields).where(
+        PurchaseRecord.kind == kind, PurchaseRecord.status.in_(("review", "approved")),
+    ).order_by(PurchaseRecord.created_at.desc(), PurchaseRecord.id))
+    for record_id, existing in rows:
+        if (vendor_name(existing.get("vendor")) == vendor and evidence_date(existing.get("transaction_date")) == day
+                and existing.get("total_amount") == total):
+            return record_id
+    return None
+
+
+def duplicate_upload(record, reason):
+    return {"record": serialize(record, full=True), "duplicate": True, "duplicate_reason": reason}
+
+
+def can_refresh_extraction(record):
+    return (record.status == "review" and not record.extraction.get("draft_saved_at")
+            and record.extraction.get("revision", 0) < EXTRACTION_REVISION)
+
+
+def refresh_duplicate(record_id, kind, document_type, fields, extraction, key):
+    with Session() as db:
+        record = get_record(db, None, record_id)
+        if not can_refresh_extraction(record) or not extraction["text"]:
+            return duplicate_upload(record, "file")
+        if record.document_type not in ("unknown", document_type):
+            return duplicate_upload(record, "file")
+        if key and (existing := existing_invoice(db, key, record_id)) is not None:
+            return duplicate_upload(existing, "approval_number")
+        if record.kind == kind:
+            fields = {**record.fields, **{field: value for field, value in fields.items()
+                                         if value not in (None, "", []) or field not in record.fields}}
+        revision = PurchaseRecord.extraction["revision"].as_integer()
+        try:
+            db.execute(update(PurchaseRecord).where(
+                PurchaseRecord.id == record_id,
+                PurchaseRecord.status == "review",
+                PurchaseRecord.extraction["draft_saved_at"].as_string().is_(None),
+                or_(revision.is_(None), revision < EXTRACTION_REVISION),
+            ).values(kind=kind, document_type=document_type, fields=fields,
+                     extraction=extraction, vendor=fields.get("vendor", "")[:200],
+                     approval_key=key or record.approval_key))
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            if key and (existing := existing_invoice(db, key, record_id)) is not None:
+                return duplicate_upload(existing, "approval_number")
+            raise
+        db.expire_all()
+        return duplicate_upload(get_record(db, None, record_id), "file")
+
+
+def store_upload(kind, filename, content, confirm_suspected=False):
     try:
         media_type, page_count = validate_file(kind, filename, content)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     digest = sha256(content).hexdigest()
-    lookup = record_query(kind).where(PurchaseRecord.file_hash == digest)
+    lookup = record_query().where(PurchaseRecord.file_hash == digest).order_by(
+        (PurchaseRecord.kind == kind).desc(), (PurchaseRecord.status == "trashed"), PurchaseRecord.created_at,
+    ).limit(1)
     with Session() as db:
         existing = db.scalar(lookup)
-        if existing is not None:
-            return {"record": serialize(existing, full=True), "duplicate": True}
+        if existing is not None and not can_refresh_extraction(existing):
+            return duplicate_upload(existing, "file")
+        existing_id = existing.id if existing else None
     extraction = extract(kind, content)
-    document_type, fields = parse_fields(kind, extraction.text, extraction.supplier_text)
+    kind, document_type, fields = recognize_upload(kind, extraction)
+    if document_type == "unknown" and extraction.text and not extraction.warning:
+        extraction.warning = "이 PDF에서 세금계산서 또는 거래명세서 양식을 확인하지 못했습니다. 원본을 대조해 주세요."
     if kind == "receipt" and extraction.text and not extraction.warning and not any(
         value not in (None, "") for value in fields.values()
     ):
         extraction.warning = "사진에서 거래처나 거래 정보를 찾지 못했습니다. 영수증 사진인지 확인하거나 직접 입력해 주세요."
+    key = invoice_approval_key(fields.get("approval_number")) if kind == "document" else None
+    extraction_data = {"text": extraction.text, "method": extraction.method, "warning": extraction.warning,
+                       "page_count": page_count, "revision": EXTRACTION_REVISION if extraction.text else 0}
+    if existing_id:
+        return refresh_duplicate(existing_id, kind, document_type, fields, extraction_data, key)
     row = PurchaseRecord(
         id=uuid4().hex, filename=filename, kind=kind, file_hash=digest, media_type=media_type,
-        original=content, document_type=document_type, fields=fields, extraction={"text": extraction.text, "method": extraction.method,
-                    "warning": extraction.warning, "page_count": page_count},
-        vendor=fields.get("vendor", "")[:200], created_at=korea_now(),
+        original=content, document_type=document_type, fields=fields, extraction=extraction_data,
+        vendor=fields.get("vendor", "")[:200], created_at=korea_now(), approval_key=key,
     )
     with Session() as db:
+        if key:
+            existing = existing_invoice(db, key)
+            if existing is not None:
+                return duplicate_upload(existing, "approval_number")
+        if not confirm_suspected:
+            suspect_id = suspected_duplicate(db, kind, fields)
+            if suspect_id:
+                existing = db.scalar(lookup)
+                if existing is not None:
+                    return duplicate_upload(existing, "file")
+                if key and (existing := existing_invoice(db, key)) is not None:
+                    return duplicate_upload(existing, "approval_number")
+                raise HTTPException(409, {"code": "suspected_duplicate", "id": suspect_id,
+                                         "message": "거래처·날짜·금액이 같은 증빙이 있습니다. 별도 거래인지 확인해 주세요."})
         db.add(row)
+        db.add(PurchaseFileClaim(file_hash=digest, record_id=row.id))
         try:
             db.commit()
         except IntegrityError:
             db.rollback()
             existing = db.scalar(lookup)
-            if existing is None:
-                raise
-            return {"record": serialize(existing, full=True), "duplicate": True}
+            if existing is not None:
+                return duplicate_upload(existing, "file")
+            if key:
+                existing = existing_invoice(db, key)
+                if existing is not None:
+                    return duplicate_upload(existing, "approval_number")
+            raise
         return {"record": serialize(row, full=True), "duplicate": False}
 
 
 def validated_fields(kind, body):
     if body.document_type != TYPE_BY_KIND[kind]:
         raise HTTPException(422, "원본을 보고 문서 유형을 확인해 주세요.")
+    date_label = {"statement": "납품일자", "document": "작성일자", "receipt": "거래일시"}[kind]
     try:
         values = FIELDS_BY_KIND[kind].model_validate(body.fields).model_dump()
     except ValidationError as exc:
-        extra_labels = {"items": "품목별 품목명·수량·단가", "statement_number": "명세서 번호"}
+        extra_labels = {"items": "품목별 품목명·수량·단가", "statement_number": "명세서 번호",
+                        "transaction_date": date_label}
         labels = dict.fromkeys(
             extra_labels.get(error["loc"][0], FIELD_LABELS.get(error["loc"][0], "입력값"))
             for error in exc.errors()
@@ -226,13 +357,13 @@ def validated_fields(kind, body):
         else:
             raise ValueError()
     except ValueError as exc:
-        raise HTTPException(422, "거래일시 또는 작성일자 형식을 확인해 주세요.") from exc
+        raise HTTPException(422, f"{date_label} 형식을 확인해 주세요.") from exc
 
     if kind == "document":
         if values["supply_amount"] + values["tax_amount"] != values["total_amount"]:
             raise HTTPException(422, "공급가액과 세액의 합이 합계금액과 일치해야 합니다.")
-        values["business_number"] = values["business_number"].replace("-", "")
-        key = re.sub(r"[- ]", "", values["approval_number"])
+        values["business_number"] = registry_number(values["business_number"])
+        return values, invoice_approval_key(values["approval_number"])
     else:
         number = values["approval_number"] if kind == "receipt" else values["statement_number"]
         if not number:
@@ -279,7 +410,7 @@ def spreadsheet(rows):
         if row.kind == "statement" and row.fields.get("items"):
             if details is None:
                 details = book.create_sheet("거래명세서 품목")
-                details.append(["기록 ID", "원본 파일", "명세서 번호", "거래처", "작성일자",
+                details.append(["기록 ID", "원본 파일", "명세서 번호", "거래처", "납품일자",
                                 "품목 순서", "품목명", "수량", "단가"])
             for index, item in enumerate(row.fields["items"], start=1):
                 append_spreadsheet_row(details, [
@@ -325,9 +456,9 @@ async def read_upload(request: Request, filename: str):
 
 def attach_routes(router: APIRouter, kind: str):
     @router.post("/uploads")
-    async def upload(request: Request, filename: str):
+    async def upload(request: Request, filename: str, confirm_suspected: bool = False):
         filename, content = await read_upload(request, filename)
-        return await run_in_threadpool(store_upload, kind, filename, content)
+        return await run_in_threadpool(store_upload, kind, filename, content, confirm_suspected)
 
     @router.get("/review-count")
     def review_count():
@@ -336,11 +467,26 @@ def attach_routes(router: APIRouter, kind: str):
                 select(func.count()).select_from(PurchaseRecord).where(PurchaseRecord.status == "review")
             )}
 
+    if kind == "document":
+        @router.get("/trash/count")
+        def trash_count():
+            with Session() as db:
+                return {"count": db.scalar(
+                    select(func.count()).select_from(PurchaseRecord).where(PurchaseRecord.status == "trashed")
+                )}
+
     @router.get("/history")
     def history(start: date | None = None, end: date | None = None, vendor: str = "",
                 document_type: DocumentType | None = None, status: Status | None = None):
         with Session() as db:
-            return [serialize(row) for row in db.scalars(history_query(start, end, vendor, document_type, status))]
+            rows = list(db.scalars(history_query(start, end, vendor, document_type, status)))
+            matches = EvidenceMatches(db, effective_fields) if any(row.kind in MATCH_TYPES for row in rows) else None
+            return [
+                {**serialize(row), "match_status": (
+                    "check" if row.document_type == "unknown" else matches.describe(row.id)["status"]
+                )} if row.kind in MATCH_TYPES and row.status != "trashed" else serialize(row)
+                for row in rows
+            ]
 
     @router.get("/export")
     def export(start: date | None = None, end: date | None = None, vendor: str = "",
@@ -352,6 +498,16 @@ def attach_routes(router: APIRouter, kind: str):
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 headers={"Content-Disposition": 'attachment; filename="purchase-history.xlsx"', "Cache-Control": "no-store"},
             )
+
+    if kind == "document":
+        @router.delete("/trash")
+        def empty_trash():
+            with Session.begin() as db:
+                result = db.execute(delete(PurchaseRecord).where(PurchaseRecord.status == "trashed"))
+                db.execute(delete(PurchaseFileClaim).where(~select(PurchaseRecord.id).where(
+                    PurchaseRecord.id == PurchaseFileClaim.record_id,
+                ).exists()))
+                return {"deleted": result.rowcount}
 
     @router.get("/{record_id}")
     def detail(record_id: str):
@@ -365,6 +521,68 @@ def attach_routes(router: APIRouter, kind: str):
     @router.post("/{record_id}/restore")
     def restore(record_id: str):
         return change_trash_status(kind, record_id, restore=True)
+
+    @router.delete("/{record_id}/permanent", status_code=204)
+    def permanently_delete(record_id: str):
+        with Session.begin() as db:
+            result = db.execute(delete(PurchaseRecord).where(
+                PurchaseRecord.id == record_id,
+                PurchaseRecord.kind == kind,
+                PurchaseRecord.status == "trashed",
+            ))
+            if not result.rowcount:
+                get_record(db, kind, record_id)
+                raise HTTPException(409, "휴지통에 있는 기록만 영구 삭제할 수 있습니다.")
+            db.execute(delete(PurchaseFileClaim).where(PurchaseFileClaim.record_id == record_id))
+        return Response(status_code=204)
+
+    if kind in MATCH_TYPES:
+        @router.get("/{record_id}/matching")
+        def match_detail(record_id: str):
+            with Session() as db:
+                row = get_record(db, kind, record_id)
+                if row.document_type == "unknown" and row.status != "trashed":
+                    return {"status": "check", "linked": None, "candidates": []}
+                return EvidenceMatches(db, effective_fields).describe(record_id, full=True)
+
+        @router.post("/{record_id}/matching")
+        def confirm_link(record_id: str, body: LinkRequest):
+            other_kind = "statement" if kind == "document" else "document"
+            try:
+                with Session.begin() as db:
+                    # Acquire both row locks in the same order as concurrent
+                    # link requests before reading the current document state.
+                    for target in sorted((record_id, body.candidate_id)):
+                        db.execute(update(PurchaseRecord).where(PurchaseRecord.id == target)
+                                   .values(status=PurchaseRecord.status))
+                    get_record(db, kind, record_id)
+                    get_record(db, other_kind, body.candidate_id)
+                    matches = EvidenceMatches(db, effective_fields)
+                    current = matches.rows.get(record_id)
+                    if matches.links.get(record_id) == body.candidate_id:
+                        return matches.describe(record_id, full=True)
+                    if record_id in matches.links or body.candidate_id in matches.links:
+                        raise HTTPException(409, "이미 연결된 증빙입니다. 기존 연결을 해제한 뒤 다시 시도해 주세요.")
+                    if not current or not any(
+                        candidate["record"]["id"] == body.candidate_id for candidate in matches.candidates(current)
+                    ):
+                        raise HTTPException(409, "연결 후보가 변경되었습니다. 증빙 대조 결과를 다시 확인해 주세요.")
+                    invoice_id, statement_id = (record_id, body.candidate_id) if kind == "document" else (
+                        body.candidate_id, record_id
+                    )
+                    db.add(PurchaseLink(invoice_id=invoice_id, statement_id=statement_id))
+                    db.flush()
+                    return EvidenceMatches(db, effective_fields).describe(record_id, full=True)
+            except IntegrityError as exc:
+                raise HTTPException(409, "이미 연결된 증빙입니다.") from exc
+
+        @router.delete("/{record_id}/matching", status_code=204)
+        def unlink(record_id: str):
+            with Session.begin() as db:
+                get_record(db, kind, record_id)
+                column = PurchaseLink.invoice_id if kind == "document" else PurchaseLink.statement_id
+                db.execute(delete(PurchaseLink).where(column == record_id))
+            return Response(status_code=204)
 
     @router.get("/{record_id}/original")
     def original(record_id: str):
@@ -393,7 +611,8 @@ def attach_routes(router: APIRouter, kind: str):
     @router.put("/{record_id}/draft")
     def save_draft(record_id: str, body: Draft):
         expected = FIELDS_BY_KIND[kind].model_fields.keys()
-        if body.fields.keys() != expected:
+        optional_statement = {"business_number", "supply_amount", "tax_amount"} if kind == "statement" else set()
+        if not (expected - optional_statement <= body.fields.keys() <= expected):
             raise HTTPException(422, "문서 유형의 임시저장 항목을 확인해 주세요.")
         fields = {}
         for name, value in body.fields.items():
@@ -437,6 +656,8 @@ def attach_routes(router: APIRouter, kind: str):
             if row.status != "review":
                 raise HTTPException(409, "휴지통에서 복원한 뒤 승인해 주세요.")
             fields, key = validated_fields(kind, body)
+            if kind == "document" and key and (existing := existing_invoice(db, key, record_id)) is not None:
+                raise HTTPException(409, {"message": "같은 승인번호가 등록된 기록이 있습니다.", "id": existing.id})
             try:
                 db.execute(
                     update(PurchaseRecord)

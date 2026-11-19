@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, LargeBinary, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Index, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import LONGBLOB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,6 +28,33 @@ class PurchaseRecord(Base):
     approval_key: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class PurchaseFileClaim(Base):
+    __tablename__ = "purchase_file_claims"
+
+    file_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    record_id: Mapped[str] = mapped_column(String(32), unique=True)
+
+
+class PurchaseLink(Base):
+    __tablename__ = "purchase_links"
+
+    invoice_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    statement_id: Mapped[str] = mapped_column(String(32), unique=True)
+
+
+class PurchaseInboxMemo(Base):
+    __tablename__ = "purchase_inbox_memos"
+    __table_args__ = (Index("ix_purchase_inbox_memo_scope", "organization_id", "record_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    record_id: Mapped[str] = mapped_column(String(32))
+    organization_id: Mapped[str] = mapped_column(String(128))
+    author_id: Mapped[str] = mapped_column(String(128))
+    author_name: Mapped[str] = mapped_column(String(200))
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
 
 
 class MobileReceiptTicket(Base):

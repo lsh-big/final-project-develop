@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, MouseEvent, ReactNode } from 'react';
 import { apiUrl, downloadWorkbook, request } from '../services/api.js';
 import { MobileReceiptUpload } from './MobileReceiptUpload';
+import { EvidenceComparison, matchStatusLabels } from './EvidenceComparison';
 
 type DocumentType = 'receipt' | 'tax_invoice' | 'trade_statement' | 'unknown';
 type Status = 'review' | 'approved' | 'trashed';
@@ -23,12 +24,13 @@ type RecordSummary = {
   status: Status;
   fields: Fields;
   created_at: string;
+  match_status?: keyof typeof matchStatusLabels;
 };
 type RecordDetail = RecordSummary & {
   page_count: number;
   draft_saved_at: string | null;
   confirmed_type: boolean;
-  extraction: { text: string; method: string; warning: string | null };
+  extraction: { text: string; method: string; warning: string | null; revision?: number };
 };
 type Filters = { start: string; end: string; vendor: string; document_type: string; status: string };
 
@@ -68,8 +70,8 @@ function purchaseApi(kind: PurchaseKind) {
 
 const tabs = [
   { kind: 'document', label: '매입 세금계산서', format: 'PDF' },
-  { kind: 'receipt', label: '구매 영수증', format: 'JPG·PNG' },
   { kind: 'statement', label: '거래명세서', format: 'PDF' },
+  { kind: 'receipt', label: '구매 영수증', format: 'JPG·PNG' },
 ] as const;
 const historyApi = purchaseApi('document');
 
@@ -110,18 +112,19 @@ function draftNumber(value: string) {
 type UploadItem =
   | { filename: string; state: 'waiting' | 'uploading' }
   | { filename: string; state: 'failed'; error: string }
-  | { filename: string; state: 'uploaded'; recordId: string; duplicate: boolean };
+  | { filename: string; state: 'uploaded'; recordId: string; duplicate: boolean; duplicateReason?: string };
 
 export type PurchaseReviewProps = {
   reviewCount: number | null;
   onReviewCountChange: () => void;
   historyWindow?: boolean;
   initialStatus?: string | null;
+  initialRecord?: string | null;
+  initialKind?: string | null;
   reviewRevision?: number;
 };
 
-function HistoryWindowLink({ status, children }: { status: Status; children: ReactNode }) {
-  const href = `?view=purchase-history&status=${status}`;
+function PopupWindowLink({ href, children }: { href: string; children: ReactNode }) {
   function openWindow(event: MouseEvent<HTMLAnchorElement>) {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     const popup = window.open('about:blank', '_blank', 'popup,width=1250,height=850,resizable,scrollbars');
@@ -135,7 +138,7 @@ function HistoryWindowLink({ status, children }: { status: Status; children: Rea
 }
 
 export function PurchaseReviewView({
-  reviewCount, onReviewCountChange, historyWindow = false, initialStatus, reviewRevision = 0,
+  reviewCount, onReviewCountChange, historyWindow = false, initialStatus, initialRecord, initialKind, reviewRevision = 0,
 }: PurchaseReviewProps) {
   const [kind, setKind] = useState<PurchaseKind>('document');
   const [reviews, setReviews] = useState<Record<string, Review>>({});
@@ -145,6 +148,9 @@ export function PurchaseReviewView({
   const [batches, setBatches] = useState<Partial<Record<PurchaseKind, UploadItem[]>>>({});
   const batch = batches[kind] ?? [];
   const batchRequest = useRef<AbortController | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const isReceipt = kind === 'receipt';
   const recordSpecs = fieldSpecs[kind];
   const initialHistoryFilters = {
     ...initialFilters,
@@ -157,6 +163,7 @@ export function PurchaseReviewView({
   const [busy, setBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [trashCount, setTrashCount] = useState<number | null>(null);
   const [historyError, setHistoryError] = useState('');
   const [historyNotice, setHistoryNotice] = useState('');
   const [error, setError] = useState('');
@@ -174,6 +181,20 @@ export function PurchaseReviewView({
     if (value.trim()) query.set(name, value.trim());
   });
   const queryString = query.toString();
+  const trashLabel = trashCount === null ? '휴지통' : trashCount === 0 ? '휴지통 · 비어 있음' : `휴지통 · ${trashCount}건`;
+  const emptyHistoryMessage = activeFilters.status !== 'trashed'
+    ? '조회된 처리 기록이 없습니다.'
+    : trashCount === 0 || !Object.entries(activeFilters).some(([name, value]) => name !== 'status' && value.trim())
+      ? '휴지통이 비어 있습니다.'
+      : '검색 조건에 맞는 휴지통 항목이 없습니다.';
+
+  useEffect(() => {
+    const abort = new AbortController();
+    request(`${historyApi}/trash/count`, { signal: abort.signal })
+      .then(({ count }: { count: number }) => { if (!abort.signal.aborted) setTrashCount(count); })
+      .catch(() => { if (!abort.signal.aborted) setTrashCount(null); });
+    return () => abort.abort();
+  }, [reviewRevision]);
 
   useEffect(() => {
     if (!historyWindow) return;
@@ -202,6 +223,7 @@ export function PurchaseReviewView({
     setReviews((current) => {
       const previous = current[next.id];
       if (preserveDraft && previous?.record.status === next.status
+          && previous.record.kind === next.kind && previous.record.extraction.revision === next.extraction.revision
           && previous.record.draft_saved_at === next.draft_saved_at) {
         return { ...current, [next.id]: { ...previous, record: next } };
       }
@@ -254,14 +276,23 @@ export function PurchaseReviewView({
         const filename = file.name;
         updateItem(index, { filename, state: 'uploading' });
         try {
-          const result: { record: RecordDetail; duplicate: boolean } = await request(
-            `${purchaseApi(kind)}/uploads?${new URLSearchParams({ filename })}`,
-            { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file, signal: abort.signal },
-          );
+          const params = new URLSearchParams({ filename });
+          const send = () => request(`${purchaseApi(kind)}/uploads?${params}`, {
+            method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file, signal: abort.signal,
+          });
+          const result: { record: RecordDetail; duplicate: boolean; duplicate_reason?: string } = await send().catch((problem: unknown) => {
+            if ((problem as { code?: string })?.code !== 'suspected_duplicate' || abort.signal.aborted) throw problem;
+            if (!window.confirm(`중복 의심 · ${filename}\n${message(problem)}\n별도 거래로 등록할까요?`)) {
+              throw new Error('중복 의심으로 등록을 취소했습니다.');
+            }
+            params.set('confirm_suspected', 'true');
+            return send();
+          });
           if (abort.signal.aborted) return;
-          updateItem(index, { filename, state: 'uploaded', recordId: result.record.id, duplicate: result.duplicate });
+          updateItem(index, { filename, state: 'uploaded', recordId: result.record.id, duplicate: result.duplicate,
+            duplicateReason: result.duplicate_reason });
           show(result.record, false, true);
-          firstRecord ??= result.record;
+          if (result.record.kind === kind || items.length === 1) firstRecord ??= result.record;
         } catch (problem) {
           if (abort.signal.aborted) return;
           updateItem(index, { filename, state: 'failed', error: message(problem) });
@@ -269,17 +300,26 @@ export function PurchaseReviewView({
       }
       if (firstRecord) {
         const firstId = firstRecord.id;
-        setSelected((current) => ({ ...current, [kind]: firstId }));
+        const nextKind = firstRecord.kind;
+        setSelected((current) => ({ ...current, [nextKind]: firstId }));
+        if (nextKind !== kind) {
+          setKind(nextKind);
+          setBatches((current) => ({ ...current, [kind]: undefined, [nextKind]: [...items] }));
+        }
         setVersion((current) => current + 1);
+        onReviewCountChange();
+      } else if (items.some((item) => item.state === 'uploaded')) {
         onReviewCountChange();
       }
       if (items.length === 1) {
         const [item] = items;
         if (item.state === 'failed') setError(item.error);
-        if (item.state === 'uploaded' && item.duplicate) {
+        if (item.state === 'uploaded' && firstRecord && firstRecord.kind !== kind) {
+          setNotice(`${typeLabels[firstRecord.document_type]} 유형으로 열린 증빙입니다.`);
+        } else if (item.state === 'uploaded' && item.duplicate) {
           setNotice(firstRecord?.status === 'trashed'
-            ? '같은 파일이 휴지통에 있습니다. 기존 기록을 복원할 수 있습니다.'
-            : '동일 파일의 기존 기록을 열었습니다.');
+            ? '중복 증빙이 휴지통에 있습니다. 기존 기록을 복원할 수 있습니다.'
+            : item.duplicateReason === 'approval_number' ? '같은 승인번호의 증빙이 이미 있습니다.' : '동일 파일이 이미 있습니다.');
         }
       }
     } finally {
@@ -304,6 +344,22 @@ export function PurchaseReviewView({
       setBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (!historyWindow || !initialRecord || !/^[a-f0-9]{32}$/.test(initialRecord)
+        || (initialKind !== 'document' && initialKind !== 'statement')) return;
+    const abort = new AbortController();
+    setBusy(true);
+    void request(`${purchaseApi(initialKind)}/${initialRecord}`, { signal: abort.signal })
+      .then((next: RecordDetail) => {
+        if (abort.signal.aborted) return;
+        show(next);
+        requestAnimationFrame(() => recordSection.current?.scrollIntoView({ block: 'start' }));
+      })
+      .catch((problem: unknown) => { if (!abort.signal.aborted) setError(message(problem)); })
+      .finally(() => { if (!abort.signal.aborted) setBusy(false); });
+    return () => abort.abort();
+  }, [historyWindow, initialKind, initialRecord]);
 
   async function saveReview(approve: boolean) {
     if (!record || busy || record.status !== 'review' || (approve && !confirmedType)) return;
@@ -381,6 +437,36 @@ export function PurchaseReviewView({
     historySection.current?.scrollIntoView({ block: 'start' });
   }
 
+  async function permanentlyDelete(row?: RecordSummary) {
+    if (busy) return;
+    const prompt = row
+      ? `‘${row.filename}’의 원본과 기록을 영구 삭제할까요? 삭제 후 복원할 수 없습니다.`
+      : '검색 조건과 관계없이 휴지통에 있는 모든 원본과 기록을 영구 삭제할까요? 삭제 후 복원할 수 없습니다.';
+    if (!window.confirm(prompt)) return;
+
+    setBusy(true);
+    setHistoryError('');
+    setHistoryNotice('');
+    try {
+      const result: { deleted: number } | null = await request(
+        row ? `${recordPath(row)}/permanent` : `${historyApi}/trash`,
+        { method: 'DELETE' },
+      );
+      const removed = new Set(row ? [row.id] : Object.values(reviews)
+        .filter(({ record: cached }) => cached.status === 'trashed')
+        .map(({ record: cached }) => cached.id));
+      setReviews((current) => Object.fromEntries(Object.entries(current).filter(([id]) => !removed.has(id))));
+      setRows((current) => current.filter((item) => row ? item.id !== row.id : item.status !== 'trashed'));
+      setHistoryNotice(row ? '기록을 영구 삭제했습니다.' : `휴지통에서 ${result?.deleted ?? 0}건을 영구 삭제했습니다.`);
+      setVersion((current) => current + 1);
+      onReviewCountChange();
+    } catch (problem) {
+      setHistoryError(message(problem));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function exportHistory() {
     setExporting(true);
     setHistoryError('');
@@ -406,17 +492,21 @@ export function PurchaseReviewView({
         </div>
         {historyWindow ? (
           <div className="flex flex-wrap gap-2">
-            <button className={secondary} type="button" onClick={() => openHistory('approved')}>승인 완료</button>
             <button className={secondary} type="button" onClick={() => openHistory('review')}>
               검토 대기함{reviewCount !== null && ` · ${reviewCount}건`}
             </button>
-            <button className={secondary} type="button" onClick={() => openHistory('trashed')}>휴지통</button>
+            <PopupWindowLink href="?view=purchase-inbox">미처리 증빙함 ↗</PopupWindowLink>
+            <button className={secondary} type="button" onClick={() => openHistory('approved')}>승인 완료</button>
+            <PopupWindowLink href="?view=purchase-prices">매입 단가 이력 ↗</PopupWindowLink>
+            <button className={secondary} type="button" onClick={() => openHistory('trashed')}>{trashLabel}</button>
           </div>
         ) : (
           <div className="flex flex-wrap gap-2">
-            <HistoryWindowLink status="approved">처리 이력 열기 ↗</HistoryWindowLink>
-            <HistoryWindowLink status="review">검토 대기함{reviewCount !== null && ` · ${reviewCount}건`} ↗</HistoryWindowLink>
-            <HistoryWindowLink status="trashed">휴지통 ↗</HistoryWindowLink>
+            <PopupWindowLink href="?view=purchase-history&status=review">검토 대기함{reviewCount !== null && ` · ${reviewCount}건`} ↗</PopupWindowLink>
+            <PopupWindowLink href="?view=purchase-inbox">미처리 증빙함 ↗</PopupWindowLink>
+            <PopupWindowLink href="?view=purchase-history&status=approved">처리 이력 ↗</PopupWindowLink>
+            <PopupWindowLink href="?view=purchase-prices">매입 단가 이력 ↗</PopupWindowLink>
+            <PopupWindowLink href="?view=purchase-history&status=trashed">{trashLabel} ↗</PopupWindowLink>
           </div>
         )}
       </header>
@@ -429,23 +519,54 @@ export function PurchaseReviewView({
             </button>
           ))}
         </div>
-        <section className="rounded-xl border border-slate-200 bg-white p-5">
-          <label className="block text-sm font-semibold" htmlFor="purchase-upload">
-            {kind === 'receipt' ? '영수증 이미지 (JPG·PNG, 파일당 10 MB 이하)'
-              : `${typeLabels[documentTypes[kind]]} PDF (파일당 12쪽·10 MB 이하)`}
-          </label>
-          <input id="purchase-upload" className="mt-3 block max-w-full text-sm" type="file" multiple
-            accept={kind === 'receipt' ? '.jpg,.jpeg,.png' : '.pdf'} disabled={busy}
+        <section className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5" aria-labelledby="purchase-upload-heading">
+          <div className={`space-y-3 rounded-lg border-2 border-dashed p-4 sm:p-5 ${
+            draggingFiles && !busy ? 'border-blue-600 bg-blue-50' : 'border-slate-300 bg-slate-50'
+          }`}
+            onDragOver={(event) => {
+              if (!event.dataTransfer.types.includes('Files')) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = busy ? 'none' : 'copy';
+              if (!busy) setDraggingFiles(true);
+            }}
+            onDragLeave={(event) => {
+              if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) {
+                setDraggingFiles(false);
+              }
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDraggingFiles(false);
+              if (!busy) void upload(Array.from(event.dataTransfer.files));
+            }}>
+            <div className="space-y-1">
+              <h2 id="purchase-upload-heading" className="text-base font-semibold">
+                {typeLabels[documentTypes[kind]]} 불러오기
+              </h2>
+              <p className="text-sm text-slate-600">파일을 끌어놓거나 버튼으로 선택하세요. 선택하면 바로 인식이 시작됩니다.</p>
+            </div>
+            <button type="button" className={`${primary} min-h-11 w-full sm:w-auto`} disabled={busy}
+              aria-describedby="purchase-upload-limit" onClick={() => fileInput.current?.click()}>
+              {isReceipt ? '이미지 선택' : 'PDF 파일 선택'}
+            </button>
+            <p id="purchase-upload-limit" className="text-xs text-slate-600">
+              {isReceipt ? 'JPG·PNG · 여러 파일 선택 가능 · 파일당 10 MB 이하'
+                : 'PDF · 여러 파일 선택 가능 · 파일당 12쪽, 10 MB 이하'}
+            </p>
+          </div>
+          <input ref={fileInput} id="purchase-upload" type="file" hidden multiple
+            accept={isReceipt ? '.jpg,.jpeg,.png' : '.pdf'} disabled={busy}
             onChange={(event) => {
               const files = Array.from(event.target.files ?? []);
               event.target.value = '';
               void upload(files);
             }} />
-          <div hidden={kind !== 'receipt'}>
+          <div hidden={!isReceipt}>
             <MobileReceiptUpload disabled={busy} onReceived={receiveMobileReceipt}
               onOpen={(id) => void open(`${purchaseApi('receipt')}/${id}`)} />
           </div>
-          {busy && <p className="mt-3 text-sm text-slate-600" role="status">처리 중입니다…</p>}
+          {busy && !batch.some(({ state }) => state === 'waiting' || state === 'uploading')
+            && <p className="mt-3 text-sm text-slate-600" role="status">처리 중입니다…</p>}
           {notice && <p className="mt-3 text-sm text-emerald-800" role="status">{notice}</p>}
           {error && <p className="mt-3 text-sm text-red-800" role="alert">{error}</p>}
           {conflictId && record && (
@@ -456,12 +577,12 @@ export function PurchaseReviewView({
           )}
         </section>
 
-        {batch.length > 1 && (
+        {batch.length > 0 && (
           <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5" aria-label="파일별 업로드 결과">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="font-semibold">파일별 업로드 결과</h2>
               <span className="text-sm text-slate-600" role="status">
-                {batch.filter(({ state }) => state === 'uploaded' || state === 'failed').length} / {batch.length}건 처리
+                {batch.filter(({ state }) => state === 'uploaded' || state === 'failed').length} / {batch.length}개 처리 완료
               </span>
             </div>
             <ul className="divide-y divide-slate-100">
@@ -473,16 +594,19 @@ export function PurchaseReviewView({
                       <p className="break-all font-medium">{item.filename}</p>
                       <p className={item.state === 'failed' ? 'text-red-800' : 'text-slate-600'}>
                         {item.state === 'failed' ? `실패 · ${item.error}`
-                          : item.state === 'uploading' ? '추출 중'
-                          : uploaded ? `${item.state === 'uploaded' && item.duplicate ? '중복 파일 · ' : ''}${statusLabels[uploaded.status]}`
+                          : item.state === 'uploading' ? '인식 중'
+                          : uploaded ? `${item.state === 'uploaded' && item.duplicate
+                            ? item.duplicateReason === 'approval_number' ? '승인번호 중복 · ' : '동일 파일 · '
+                            : '불러오기 완료 · '}${statusLabels[uploaded.status]}`
                           : '업로드 대기'}
                       </p>
                     </div>
                     {uploaded && (
                       <button type="button" className={selectedId === uploaded.id ? primary : secondary} disabled={busy}
-                        aria-label={`${item.filename} 검토 열기`} aria-pressed={selectedId === uploaded.id}
+                        aria-label={`${item.filename} ${item.state === 'uploaded' && item.duplicate ? '기존 증빙 보기' : '검토 열기'}`}
+                        aria-pressed={selectedId === uploaded.id}
                         onClick={() => void open(recordPath(uploaded))}>
-                        {selectedId === uploaded.id ? '선택됨' : '검토 열기'}
+                        {item.state === 'uploaded' && item.duplicate ? '기존 증빙 보기' : selectedId === uploaded.id ? '선택됨' : '검토 열기'}
                       </button>
                     )}
                   </li>
@@ -497,7 +621,12 @@ export function PurchaseReviewView({
         <section ref={historySection} className="scroll-mt-32 space-y-4 rounded-xl border border-slate-200 bg-white p-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="font-semibold">{activeFilters.status ? statusLabels[activeFilters.status as Status] : '전체 기록'}</h2>
-            {activeFilters.status !== 'trashed' && (
+            {activeFilters.status === 'trashed' ? (
+              <button className={`${secondary} border-red-200 text-red-800 hover:bg-red-50`} type="button"
+                disabled={busy || historyLoading || trashCount === 0} onClick={() => void permanentlyDelete()}>
+                전체 삭제하기
+              </button>
+            ) : (
               <button className={secondary} disabled={exporting || historyLoading} onClick={() => void exportHistory()}>엑셀 다운로드</button>
             )}
           </div>
@@ -534,12 +663,12 @@ export function PurchaseReviewView({
           {historyNotice && <p className="text-sm text-emerald-800" role="status">{historyNotice}</p>}
           {historyError && <p className="text-sm text-red-800" role="alert">{historyError}</p>}
           {historyLoading && <p className="text-sm text-slate-600" role="status">이력을 불러오는 중입니다…</p>}
-          {!historyLoading && !historyError && !rows.length && <p className="text-sm text-slate-600">조회된 처리 기록이 없습니다.</p>}
+          {!historyLoading && !historyError && !rows.length && <p className="text-sm text-slate-600" role="status">{emptyHistoryMessage}</p>}
           {!!rows.length && (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[740px] text-left text-sm">
                 <thead className="bg-slate-50">
-                  <tr>{['원본 파일', '문서 유형', '거래처', '합계금액', '처리 상태', '등록일시', '삭제'].map((label) => <th key={label} scope="col" className="px-3 py-2">{label}</th>)}</tr>
+                  <tr>{['원본 파일', '문서 유형', '거래처', '합계금액', '처리 상태', '증빙 대조', '등록일시', '삭제'].map((label) => <th key={label} scope="col" className="px-3 py-2">{label}</th>)}</tr>
                 </thead>
                 <tbody>
                   {rows.map((row) => (
@@ -549,14 +678,14 @@ export function PurchaseReviewView({
                       <td className="px-3 py-2">{row.fields.vendor || '—'}</td>
                       <td className="px-3 py-2 tabular-nums">{row.fields.total_amount?.toLocaleString('ko-KR') ?? '—'}</td>
                       <td className="px-3 py-2">{statusLabels[row.status]}</td>
+                      <td className="px-3 py-2">{row.match_status ? matchStatusLabels[row.match_status] : '—'}</td>
                       <td className="px-3 py-2">{formatDate(row.created_at)}</td>
                       <td className="px-3 py-2">
-                        {row.status !== 'trashed' && (
-                          <button type="button" className="whitespace-nowrap rounded border border-red-200 px-2 py-1 text-sm font-semibold text-red-800 hover:bg-red-50 disabled:opacity-50"
-                            aria-label={`${row.filename} 삭제`} disabled={busy} onClick={() => void changeTrashStatus(false, row)}>
-                            삭제
-                          </button>
-                        )}
+                        <button type="button" className="whitespace-nowrap rounded border border-red-200 px-2 py-1 text-sm font-semibold text-red-800 hover:bg-red-50 disabled:opacity-50"
+                          aria-label={`${row.filename} 삭제`} disabled={busy}
+                          onClick={() => void (row.status === 'trashed' ? permanentlyDelete(row) : changeTrashStatus(false, row))}>
+                          삭제
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -658,6 +787,11 @@ export function PurchaseReviewView({
                   </>
                 )}
               </form>
+              {kind !== 'receipt' && record.status !== 'trashed' && (
+                <EvidenceComparison key={record.id} path={`${recordPath(record)}/matching`} kind={kind}
+                  fields={record.fields} revision={version + reviewRevision} disabled={busy}
+                  primaryClass={primary} secondaryClass={secondary} onChange={onReviewCountChange} />
+              )}
             </section>
           </div>
         )}
@@ -691,8 +825,11 @@ const fieldSpecs: Record<PurchaseKind, FieldSpec[]> = {
   receipt: receiptFields,
   statement: [
     { name: 'vendor', label: '거래처명' },
-    { name: 'transaction_date', label: '작성일자', format: 'date' },
+    { name: 'business_number', label: '공급자 사업자등록번호 (선택)', optional: true },
+    { name: 'transaction_date', label: '납품일자', format: 'date' },
     { name: 'statement_number', label: '명세서 번호 (선택)', optional: true },
+    { name: 'supply_amount', label: '공급가액 (원, 선택)', format: 'amount', optional: true },
+    { name: 'tax_amount', label: '부가세 (원, 선택)', format: 'amount', optional: true },
     { name: 'total_amount', label: '합계금액 (원, 선택)', format: 'amount', optional: true },
   ],
 };

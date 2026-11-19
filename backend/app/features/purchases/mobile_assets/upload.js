@@ -110,17 +110,39 @@ form.addEventListener('submit', async (event) => {
     }
     if (body.has('photos')) {
       status.textContent = '전송 중입니다…';
-      const response = await fetch('/upload-batch', {
+      const send = (data, confirmed = false) => fetch(confirmed ? '/upload-batch?confirm_suspected=true' : '/upload-batch', {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + token },
-        body,
+        body: data,
       });
+      const response = await send(body);
       const result = await response.json();
       if (!response.ok) {
         retry = ![404, 410].includes(response.status);
         throw new Error(typeof result.detail === 'string' ? result.detail : '전송하지 못했습니다.');
       }
       retry = !result.received;
+      const photos = body.getAll('photos');
+      if (retry && result.items.some((item) => item.suspected_duplicate)) {
+        const confirmed = new FormData();
+        const indices = [];
+        result.items.forEach((item, index) => {
+          if (!item.suspected_duplicate || !window.confirm(`중복 의심 · ${item.filename}\n별도 거래로 등록할까요?`)) return;
+          const file = photos[index];
+          confirmed.append('photos', file, file.name);
+          indices.push(index);
+        });
+        if (indices.length) {
+          const confirmedResponse = await send(confirmed, true);
+          const confirmedResult = await confirmedResponse.json();
+          if (!confirmedResponse.ok) {
+            retry = ![404, 410].includes(confirmedResponse.status);
+            throw new Error(typeof confirmedResult.detail === 'string' ? confirmedResult.detail : '전송하지 못했습니다.');
+          }
+          retry = !confirmedResult.received;
+          confirmedResult.items.forEach((item, index) => { result.items[indices[index]] = item; });
+        }
+      }
       items.push(...result.items);
     }
     const failed = items.filter(({ error }) => error).length;

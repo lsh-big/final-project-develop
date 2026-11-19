@@ -156,10 +156,10 @@ def finish_ticket(ticket_id, first=None, items=None):
         db.commit()
 
 
-def receive(ticket_id, filename, content):
+def receive(ticket_id, filename, content, confirm_suspected=False):
     claim_ticket(ticket_id)
     try:
-        result = store_upload("receipt", filename, content)
+        result = store_upload("receipt", filename, content, confirm_suspected)
     except Exception:
         finish_ticket(ticket_id)
         raise
@@ -168,10 +168,10 @@ def receive(ticket_id, filename, content):
 
 
 @mobile_app.post("/upload")
-async def mobile_upload(request: Request, filename: str):
+async def mobile_upload(request: Request, filename: str, confirm_suspected: bool = False):
     ticket_id = await run_in_threadpool(waiting_ticket, request)
     filename, content = await read_upload(request, filename)
-    return await run_in_threadpool(receive, ticket_id, filename, content)
+    return await run_in_threadpool(receive, ticket_id, filename, content, confirm_suspected)
 
 
 class BatchTooLarge(MultiPartException):
@@ -190,7 +190,7 @@ async def limited_batch_stream(request):
         raise MultiPartException("사진 전송이 중단되었습니다.") from exc
 
 
-def receive_batch(ticket_id, photos):
+def receive_batch(ticket_id, photos, confirm_suspected=False):
     items = []
     first = None
     for photo in photos:
@@ -200,11 +200,14 @@ def receive_batch(ticket_id, photos):
             content = photo.file.read(MAX_BYTES + 1)
             if len(content) > MAX_BYTES:
                 raise HTTPException(413, "파일 크기는 최대 10 MB입니다.")
-            result = store_upload("receipt", filename, content)
+            result = store_upload("receipt", filename, content, confirm_suspected)
             item = {"filename": filename, "record_id": result["record"]["id"], "duplicate": result["duplicate"]}
             first = first or item
         except HTTPException as exc:
-            item = {"filename": filename, "error": str(exc.detail)}
+            detail = exc.detail
+            item = {"filename": filename, "error": detail["message"] if isinstance(detail, dict) else str(detail)}
+            if isinstance(detail, dict) and detail.get("code") == "suspected_duplicate":
+                item["suspected_duplicate"] = True
         except Exception:
             logger.exception("Mobile receipt extraction or save failed")
             item = {"filename": filename, "error": "사진을 처리하지 못했습니다. 다시 시도해 주세요."}
@@ -226,7 +229,7 @@ def release_uploading_ticket(ticket_id):
 
 
 @mobile_app.post("/upload-batch")
-async def mobile_upload_batch(request: Request):
+async def mobile_upload_batch(request: Request, confirm_suspected: bool = False):
     ticket_id = await run_in_threadpool(waiting_ticket, request)
     content_type = request.headers.get("content-type", "")
     if not content_type.lower().startswith("multipart/form-data;"):
@@ -244,7 +247,7 @@ async def mobile_upload_batch(request: Request):
         photos = form.getlist("photos")
         if not photos or len(photos) != len(form.multi_items()) or any(not isinstance(photo, UploadFile) for photo in photos):
             raise HTTPException(422, "전송할 사진을 선택해 주세요.")
-        result = await run_in_threadpool(receive_batch, ticket_id, photos)
+        result = await run_in_threadpool(receive_batch, ticket_id, photos, confirm_suspected)
         finished = True
         return result
     except BatchTooLarge as exc:

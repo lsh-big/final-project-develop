@@ -10,6 +10,7 @@ async function checkedResponse(path, options) {
     const message = typeof detail === 'string' ? detail : detail?.message;
     throw Object.assign(new Error(message || `API 요청 실패 (HTTP ${response.status})`), {
       recordId: detail?.id,
+      code: detail?.code,
     });
   }
   return response;

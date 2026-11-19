@@ -9,10 +9,14 @@ import DashboardPage from './pages/DashboardPage.jsx';
 import TrendPage from './pages/TrendPage.jsx';
 import FinancePage from './pages/FinancePage.jsx';
 import DocumentPage from './pages/DocumentPage.jsx';
+import { PurchaseInbox } from './components/PurchaseInbox';
+import { PurchasePriceHistory } from './components/PurchasePriceHistory';
 import DataOpsPage from './pages/DataOpsPage.jsx';
 const pages = { dashboard: DashboardPage, 'news-sns': TrendPage, finance: FinancePage, dataops: DataOpsPage };
 const purchaseHistoryParams = new URLSearchParams(window.location.search);
 const historyWindow = purchaseHistoryParams.get('view') === 'purchase-history';
+const inboxWindow = purchaseHistoryParams.get('view') === 'purchase-inbox';
+const priceWindow = purchaseHistoryParams.get('view') === 'purchase-prices';
 
 function Workspace() {
  const { activeTab } = usePlatform();
@@ -22,6 +26,8 @@ function Workspace() {
  const reviewChannel = useRef(null);
  useEffect(() => {
    if (historyWindow) document.title = '처리 이력 | DataPulse AI';
+   if (inboxWindow) document.title = '미처리 증빙함 | DataPulse AI';
+   if (priceWindow) document.title = '매입 단가 이력 | DataPulse AI';
  }, []);
  const refreshReviewCount = useCallback(() => {
    setReviewVersion((version) => version + 1);
@@ -46,9 +52,20 @@ function Workspace() {
      .catch(() => { if (!abort.signal.aborted) setReviewCount(null); });
    return () => abort.abort();
  }, [activeTab, reviewVersion]);
+ if (priceWindow) {
+   return <main className="mx-auto min-h-screen max-w-[1440px] bg-slate-50 px-4 py-8 text-slate-900 sm:px-6">
+     <PurchasePriceHistory revision={reviewVersion} />
+   </main>;
+ }
+ if (inboxWindow) {
+   return <main className="mx-auto min-h-screen max-w-[1440px] bg-slate-50 px-4 py-8 text-slate-900 sm:px-6">
+     <PurchaseInbox revision={reviewVersion} />
+   </main>;
+ }
  if (historyWindow) {
    return <main className="mx-auto min-h-screen max-w-[1440px] bg-slate-50 px-4 py-8 text-slate-900 sm:px-6">
      <DocumentPage historyWindow initialStatus={purchaseHistoryParams.get('status')} reviewRevision={reviewVersion}
+       initialRecord={purchaseHistoryParams.get('record')} initialKind={purchaseHistoryParams.get('kind')}
        reviewCount={reviewCount} onReviewCountChange={refreshReviewCount} />
    </main>;
  }
@@ -57,7 +74,7 @@ function Workspace() {
    {activeTab !== 'doc-ai' && <div role="note" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs text-amber-900">데모 모드 · 뉴스·시세·AI·OCR·로그인·자동화는 시뮬레이션입니다. 실제 API·DB에는 연결되지 않습니다.</div>}
    <main className={activeTab === 'dashboard' ? '' : 'mx-auto max-w-[1440px] px-4 py-8 sm:px-6'}>
      {activeTab === 'doc-ai'
-       ? <DocumentPage reviewCount={reviewCount} onReviewCountChange={refreshReviewCount} />
+       ? <DocumentPage reviewCount={reviewCount} onReviewCountChange={refreshReviewCount} reviewRevision={reviewVersion} />
        : <Page />}
    </main>
    <footer className="border-t border-slate-200 bg-white px-4 py-5 text-xs text-slate-600">
