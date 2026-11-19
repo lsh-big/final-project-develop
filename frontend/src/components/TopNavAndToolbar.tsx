@@ -8,7 +8,7 @@ import { ResilientImage } from './ResilientImage';
 const NAV_ITEMS: { id: AppTab; label: string }[] = [
   { id: 'dashboard', label: '대시보드' },
   { id: 'news-sns', label: '뉴스·SNS' },
-  { id: 'doc-ai', label: 'AI 문서' },
+  { id: 'doc-ai', label: 'AI 업무지원' },
   { id: 'finance', label: '금융 분석' },
   { id: 'dataops', label: '운영 콘솔' },
 ];

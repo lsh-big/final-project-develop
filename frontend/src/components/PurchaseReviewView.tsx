@@ -1,3 +1,4 @@
+import { ArrowUpRight, ChartNoAxesCombined, Check, ClipboardCheck, FileSpreadsheet, FileText, History, Inbox, Receipt, Trash2, type LucideIcon } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, MouseEvent, ReactNode } from 'react';
 import { apiUrl, downloadWorkbook, request } from '../services/api.js';
@@ -68,11 +69,12 @@ function purchaseApi(kind: PurchaseKind) {
   return `/api/v1/${endpoints[kind]}`;
 }
 
-const tabs = [
-  { kind: 'document', label: '매입 세금계산서', format: 'PDF' },
-  { kind: 'statement', label: '거래명세서', format: 'PDF' },
-  { kind: 'receipt', label: '구매 영수증', format: 'JPG·PNG' },
-] as const;
+const uploadTypes = {
+  document: { label: typeLabels.tax_invoice, format: 'PDF', icon: FileText },
+  statement: { label: typeLabels.trade_statement, format: 'PDF', icon: FileSpreadsheet },
+  receipt: { label: '구매 영수증', format: 'JPG·PNG', icon: Receipt },
+} satisfies Record<PurchaseKind, { label: string; format: string; icon: LucideIcon }>;
+const uploadKinds = Object.keys(uploadTypes) as PurchaseKind[];
 const historyApi = purchaseApi('document');
 
 function message(error: unknown) {
@@ -92,6 +94,33 @@ type Review = {
   confirmedType: boolean;
   items: StatementItemDraft[];
 };
+
+function missingFields(kind: PurchaseKind, draft: Review['draft']) {
+  return fieldSpecs[kind].filter(({ name, optional }) => !optional && !(draft[name] ?? '').trim());
+}
+
+function reviewInputId(name: string) {
+  return `purchase-review-${name}`;
+}
+
+function firstMissingItemInput(items: StatementItemDraft[]) {
+  for (const [index, item] of items.entries()) {
+    const field = statementItemFields.find(([name]) => !item[name].trim());
+    if (field) return reviewInputId(`item-${index}-${field[0]}`);
+  }
+}
+
+function uploadReviewChecks(review: Review) {
+  if (review.record.status !== 'review') return [];
+  const checks = missingFields(review.record.kind, review.draft).map(({ name, label }) => ({ name, label }));
+  if (review.record.kind === 'statement' && firstMissingItemInput(review.items)) {
+    checks.push({ name: 'items', label: '품목 정보' });
+  }
+  if (review.record.document_type === 'unknown' && !review.confirmedType) {
+    checks.unshift({ name: 'confirmed_type', label: '증빙 유형' });
+  }
+  return checks;
+}
 
 const statementItemLimit = 200;
 let nextStatementItemKey = 0;
@@ -117,6 +146,8 @@ type UploadItem =
 export type PurchaseReviewProps = {
   reviewCount: number | null;
   onReviewCountChange: () => void;
+  workspaceAction?: ReactNode;
+  workspaceOverview?: ReactNode;
   historyWindow?: boolean;
   initialStatus?: string | null;
   initialRecord?: string | null;
@@ -124,7 +155,9 @@ export type PurchaseReviewProps = {
   reviewRevision?: number;
 };
 
-function PopupWindowLink({ href, children }: { href: string; children: ReactNode }) {
+function PopupWindowLink({ href, children, icon: Icon, className = '' }: {
+  href: string; children: ReactNode; icon?: LucideIcon; className?: string;
+}) {
   function openWindow(event: MouseEvent<HTMLAnchorElement>) {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     const popup = window.open('about:blank', '_blank', 'popup,width=1250,height=850,resizable,scrollbars');
@@ -134,11 +167,18 @@ function PopupWindowLink({ href, children }: { href: string; children: ReactNode
       popup.location.replace(event.currentTarget.href);
     }
   }
-  return <a className={secondary} href={href} target="_blank" rel="noopener noreferrer" onClick={openWindow}>{children}</a>;
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" onClick={openWindow}
+      className={Icon ? `inline-flex min-h-10 items-center gap-1.5 rounded-md px-2 text-sm font-medium text-slate-700 hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-blue-700 ${className}` : secondary}>
+      {Icon && <Icon aria-hidden="true" className="size-4 shrink-0 text-slate-500" />}
+      {children}
+      {Icon && <><ArrowUpRight aria-hidden="true" className="size-3 shrink-0 text-slate-500" /><span className="sr-only"> (새 창)</span></>}
+    </a>
+  );
 }
 
 export function PurchaseReviewView({
-  reviewCount, onReviewCountChange, historyWindow = false, initialStatus, initialRecord, initialKind, reviewRevision = 0,
+  reviewCount, onReviewCountChange, workspaceAction, workspaceOverview, historyWindow = false, initialStatus, initialRecord, initialKind, reviewRevision = 0,
 }: PurchaseReviewProps) {
   const [kind, setKind] = useState<PurchaseKind>('document');
   const [reviews, setReviews] = useState<Record<string, Review>>({});
@@ -151,6 +191,7 @@ export function PurchaseReviewView({
   const fileInput = useRef<HTMLInputElement>(null);
   const [draggingFiles, setDraggingFiles] = useState(false);
   const isReceipt = kind === 'receipt';
+  const uploadType = uploadTypes[kind];
   const recordSpecs = fieldSpecs[kind];
   const initialHistoryFilters = {
     ...initialFilters,
@@ -171,6 +212,7 @@ export function PurchaseReviewView({
   const [conflictId, setConflictId] = useState('');
   const historySection = useRef<HTMLElement>(null);
   const recordSection = useRef<HTMLDivElement>(null);
+  const [reviewFocus, setReviewFocus] = useState<{ recordId: string; field: string }>();
   const receiveMobileReceipt = useCallback(() => {
     setVersion((current) => current + 1);
     onReviewCountChange();
@@ -216,6 +258,19 @@ export function PurchaseReviewView({
   }, [historyWindow, queryString, reviewRevision, version]);
 
   useEffect(() => () => batchRequest.current?.abort(), []);
+
+  useEffect(() => {
+    if (busy || !reviewFocus || record?.id !== reviewFocus.recordId) return;
+    const id = reviewFocus.field === 'items' ? firstMissingItemInput(items) : reviewInputId(reviewFocus.field);
+    const input = id ? document.getElementById(id) : null;
+    if (record.status === 'review' && input instanceof HTMLInputElement) {
+      input.scrollIntoView({ block: 'center' });
+      input.focus({ preventScroll: true });
+    } else {
+      recordSection.current?.scrollIntoView({ block: 'center' });
+    }
+    setReviewFocus(undefined);
+  }, [busy, items, record, reviewFocus]);
 
   function show(next: RecordDetail, select = true, preserveDraft = false) {
     const nextKind = recordKind(next);
@@ -328,15 +383,17 @@ export function PurchaseReviewView({
     }
   }
 
-  async function open(path: string) {
+  async function open(path: string, field?: string) {
     setBusy(true);
     setError('');
     setNotice('');
     setConflictId('');
     if (historyWindow) setHistoryError('');
     try {
-      show(await request(path), true, true);
-      if (historyWindow) requestAnimationFrame(() => recordSection.current?.scrollIntoView({ block: 'start' }));
+      const next: RecordDetail = await request(path);
+      show(next, true, true);
+      if (field) setReviewFocus({ recordId: next.id, field });
+      else if (historyWindow) requestAnimationFrame(() => recordSection.current?.scrollIntoView({ block: 'start' }));
     } catch (problem) {
       if (historyWindow) setHistoryError(message(problem));
       else setError(message(problem));
@@ -480,16 +537,18 @@ export function PurchaseReviewView({
   }
 
   const original = record ? apiUrl(`${recordPath(record)}/original`) : '';
-  const missingRequired = recordSpecs.some(({ name, optional }) => !optional && !(draft[name] ?? '').trim())
-    || (kind === 'statement' && items.some(({ name, quantity, unit_price }) => !name.trim() || !quantity || !unit_price));
+  const missingRequired = missingFields(kind, draft).length > 0
+    || (kind === 'statement' && Boolean(firstMissingItemInput(items)));
 
   return (
     <section className="space-y-6">
-      <header className="flex flex-wrap items-start justify-between gap-3">
+      <header className={`flex flex-wrap justify-between gap-3 ${workspaceAction ? 'items-center' : 'items-start'}`}>
         <div className="space-y-1">
           <h1 className="text-2xl font-bold">{historyWindow ? '처리 이력' : '구매 증빙 처리'}</h1>
           {!historyWindow && <p className="text-sm text-slate-600">구매 증빙을 업로드하고 원본과 추출값을 대조해 승인합니다.</p>}
         </div>
+        {workspaceAction}
+        {workspaceOverview}
         {historyWindow ? (
           <div className="flex flex-wrap gap-2">
             <button className={secondary} type="button" onClick={() => openHistory('review')}>
@@ -501,23 +560,43 @@ export function PurchaseReviewView({
             <button className={secondary} type="button" onClick={() => openHistory('trashed')}>{trashLabel}</button>
           </div>
         ) : (
-          <div className="flex flex-wrap gap-2">
-            <PopupWindowLink href="?view=purchase-history&status=review">검토 대기함{reviewCount !== null && ` · ${reviewCount}건`} ↗</PopupWindowLink>
-            <PopupWindowLink href="?view=purchase-inbox">미처리 증빙함 ↗</PopupWindowLink>
-            <PopupWindowLink href="?view=purchase-history&status=approved">처리 이력 ↗</PopupWindowLink>
-            <PopupWindowLink href="?view=purchase-prices">매입 단가 이력 ↗</PopupWindowLink>
-            <PopupWindowLink href="?view=purchase-history&status=trashed">{trashLabel} ↗</PopupWindowLink>
-          </div>
+          <nav aria-labelledby="purchase-shortcuts-heading" className="flex w-full flex-wrap items-center gap-x-3 rounded-lg border border-slate-200 bg-white px-2 py-1">
+            <h2 id="purchase-shortcuts-heading" className="w-full px-2 pt-1 text-xs font-semibold text-slate-600 lg:w-auto lg:pt-0">증빙함 바로가기</h2>
+            <PopupWindowLink href="?view=purchase-history&status=review" icon={ClipboardCheck}>
+              검토 대기함
+              {reviewCount !== null && (
+                <span className={`whitespace-nowrap rounded-full px-1.5 text-xs font-semibold tabular-nums ${reviewCount > 0 ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 text-slate-600'}`}>
+                  {reviewCount}건
+                </span>
+              )}
+            </PopupWindowLink>
+            <PopupWindowLink href="?view=purchase-inbox" icon={Inbox}>미처리 증빙함</PopupWindowLink>
+            <PopupWindowLink href="?view=purchase-history&status=approved" icon={History}>처리 이력</PopupWindowLink>
+            <PopupWindowLink href="?view=purchase-prices" icon={ChartNoAxesCombined}>매입 단가 이력</PopupWindowLink>
+            <PopupWindowLink href="?view=purchase-history&status=trashed" icon={Trash2} className="sm:ml-auto">{trashLabel}</PopupWindowLink>
+          </nav>
         )}
       </header>
       {!historyWindow && <>
-        <div aria-label="구매 증빙 유형" role="group" className="flex flex-wrap gap-2">
-          {tabs.map((tab) => (
-            <button key={tab.kind} type="button" disabled={busy} aria-pressed={kind === tab.kind}
-              className={kind === tab.kind ? primary : secondary} onClick={() => selectTab(tab.kind)}>
-              {tab.label} <span className="ml-1 text-xs font-normal">({tab.format})</span>
-            </button>
-          ))}
+        <div className="space-y-2">
+          <h2 id="purchase-types-heading" className="text-sm font-semibold text-slate-800">업로드할 증빙 선택</h2>
+          <div role="group" aria-labelledby="purchase-types-heading" className="grid gap-2 sm:grid-cols-3 sm:gap-3">
+            {uploadKinds.map((option) => {
+              const { label, format, icon: Icon } = uploadTypes[option];
+              const active = kind === option;
+              return (
+                <button key={option} type="button" disabled={busy} aria-pressed={active} onClick={() => selectTab(option)}
+                  className={`flex min-h-16 min-w-0 items-center gap-2 rounded-xl border px-3 py-2 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700 disabled:opacity-50 sm:min-h-20 sm:px-4 ${active ? 'border-blue-600 bg-blue-50 text-blue-950' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}>
+                  <Icon aria-hidden="true" className={`size-5 shrink-0 ${active ? 'text-blue-700' : 'text-slate-500'}`} />
+                  <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="text-sm font-semibold">{label}</span>
+                    <span className={`whitespace-nowrap rounded px-1.5 text-xs font-medium ${active ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 text-slate-600'}`}>{format}</span>
+                  </span>
+                  {active && <Check aria-hidden="true" className="size-4 shrink-0 text-blue-700" />}
+                </button>
+              );
+            })}
+          </div>
         </div>
         <section className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5" aria-labelledby="purchase-upload-heading">
           <div className={`space-y-3 rounded-lg border-2 border-dashed p-4 sm:p-5 ${
@@ -541,13 +620,13 @@ export function PurchaseReviewView({
             }}>
             <div className="space-y-1">
               <h2 id="purchase-upload-heading" className="text-base font-semibold">
-                {typeLabels[documentTypes[kind]]} 불러오기
+                {uploadType.label} 불러오기
               </h2>
               <p className="text-sm text-slate-600">파일을 끌어놓거나 버튼으로 선택하세요. 선택하면 바로 인식이 시작됩니다.</p>
             </div>
             <button type="button" className={`${primary} min-h-11 w-full sm:w-auto`} disabled={busy}
               aria-describedby="purchase-upload-limit" onClick={() => fileInput.current?.click()}>
-              {isReceipt ? '이미지 선택' : 'PDF 파일 선택'}
+              {uploadType.label} {isReceipt ? '이미지' : 'PDF'} 선택
             </button>
             <p id="purchase-upload-limit" className="text-xs text-slate-600">
               {isReceipt ? 'JPG·PNG · 여러 파일 선택 가능 · 파일당 10 MB 이하'
@@ -587,7 +666,9 @@ export function PurchaseReviewView({
             </div>
             <ul className="divide-y divide-slate-100">
               {batch.map((item, index) => {
-                const uploaded = item.state === 'uploaded' ? reviews[item.recordId]?.record : undefined;
+                const review = item.state === 'uploaded' ? reviews[item.recordId] : undefined;
+                const uploaded = review?.record;
+                const checks = review ? uploadReviewChecks(review) : [];
                 return (
                   <li key={index} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
                     <div className="min-w-0">
@@ -600,6 +681,16 @@ export function PurchaseReviewView({
                             : '불러오기 완료 · '}${statusLabels[uploaded.status]}`
                           : '업로드 대기'}
                       </p>
+                      {!!checks.length && uploaded && (
+                        <div className="mt-1 flex flex-wrap items-baseline gap-1.5">
+                          <span className="text-xs font-semibold text-amber-900">확인 필요</span>
+                          {checks.map(({ name, label }) => (
+                            <button key={name} type="button" disabled={busy} aria-label={`${item.filename} ${label} 확인`}
+                              className="rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-950 underline underline-offset-2 hover:bg-amber-100 focus-visible:outline-blue-700 disabled:opacity-50"
+                              onClick={() => void open(recordPath(uploaded), name)}>{label}</button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     {uploaded && (
                       <button type="button" className={selectedId === uploaded.id ? primary : secondary} disabled={busy}
@@ -755,7 +846,7 @@ export function PurchaseReviewView({
               <form className="mt-4 space-y-3" onSubmit={approve}>
                 {record.document_type === 'unknown' && (
                   <label className="flex items-center gap-2 text-sm font-medium">
-                    <input type="checkbox" checked={confirmedType} disabled={record.status !== 'review' || busy} onChange={(event) => updateReview({ confirmedType: event.target.checked })} />
+                    <input id={reviewInputId('confirmed_type')} type="checkbox" checked={confirmedType} disabled={record.status !== 'review' || busy} onChange={(event) => updateReview({ confirmedType: event.target.checked })} />
                     원본이 {typeLabels[documentTypes[kind]]}임을 확인했습니다
                   </label>
                 )}
@@ -763,7 +854,7 @@ export function PurchaseReviewView({
                   {recordSpecs.map(({ name, label, format, optional }) => (
                     <label key={name} className="space-y-1 text-sm font-medium">
                       <span>{label}</span>
-                      <input className={control} value={draft[name] ?? ''} name={name}
+                      <input id={reviewInputId(name)} className={control} value={draft[name] ?? ''} name={name}
                         type={format === 'amount' ? 'number' : format === 'date' ? 'date' : 'text'}
                         placeholder={format === 'datetime-local' ? 'YYYY-MM-DD HH:MM' : undefined}
                         required={!optional}
@@ -834,6 +925,12 @@ const fieldSpecs: Record<PurchaseKind, FieldSpec[]> = {
   ],
 };
 
+const statementItemFields = [
+  ['name', '품목명'],
+  ['quantity', '수량'],
+  ['unit_price', '단가 (원)'],
+] as const;
+
 function StatementItems({ items, readOnly, busy, onChange }: {
   items: StatementItemDraft[];
   readOnly: boolean;
@@ -845,14 +942,10 @@ function StatementItems({ items, readOnly, busy, onChange }: {
       <legend className="px-1 text-sm font-semibold">품목별 수량과 단가</legend>
       {items.map((item, index) => (
         <div key={item.key} className="grid items-end gap-2 border-b border-slate-100 pb-2 sm:grid-cols-[2fr_1fr_1fr_auto]">
-          {([
-            ['name', '품목명'],
-            ['quantity', '수량'],
-            ['unit_price', '단가 (원)'],
-          ] as const).map(([name, label]) => (
+          {statementItemFields.map(([name, label]) => (
             <label key={name} className="space-y-1 text-sm">
               <span>{label}</span>
-              <input className={control} aria-label={`${index + 1}번 품목 ${label}`}
+              <input id={reviewInputId(`item-${index}-${name}`)} className={control} aria-label={`${index + 1}번 품목 ${label}`}
                 type={name === 'name' ? 'text' : 'number'} step={name === 'name' ? undefined : 'any'}
                 maxLength={name === 'name' ? 200 : undefined} value={item[name]} required
                 onChange={(event) => onChange(items.map((row) => row.key === item.key ? { ...row, [name]: event.target.value } : row))} />

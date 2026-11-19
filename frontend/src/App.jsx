@@ -9,6 +9,8 @@ import DashboardPage from './pages/DashboardPage.jsx';
 import TrendPage from './pages/TrendPage.jsx';
 import FinancePage from './pages/FinancePage.jsx';
 import DocumentPage from './pages/DocumentPage.jsx';
+import { AIMailInbox } from './components/AIMailInbox';
+import { PeerPerformance } from './components/PeerPerformance';
 import { PurchaseInbox } from './components/PurchaseInbox';
 import { PurchasePriceHistory } from './components/PurchasePriceHistory';
 import DataOpsPage from './pages/DataOpsPage.jsx';
@@ -17,6 +19,8 @@ const purchaseHistoryParams = new URLSearchParams(window.location.search);
 const historyWindow = purchaseHistoryParams.get('view') === 'purchase-history';
 const inboxWindow = purchaseHistoryParams.get('view') === 'purchase-inbox';
 const priceWindow = purchaseHistoryParams.get('view') === 'purchase-prices';
+const mailWindow = purchaseHistoryParams.get('view') === 'ai-mail';
+const peerWindow = purchaseHistoryParams.get('view') === 'peer-performance';
 
 function Workspace() {
  const { activeTab } = usePlatform();
@@ -28,6 +32,8 @@ function Workspace() {
    if (historyWindow) document.title = '처리 이력 | DataPulse AI';
    if (inboxWindow) document.title = '미처리 증빙함 | DataPulse AI';
    if (priceWindow) document.title = '매입 단가 이력 | DataPulse AI';
+   if (mailWindow) document.title = 'AI 메일 업무함 | DataPulse AI';
+   if (peerWindow) document.title = '동종업체 실적 비교 | DataPulse AI';
  }, []);
  const refreshReviewCount = useCallback(() => {
    setReviewVersion((version) => version + 1);
@@ -52,6 +58,16 @@ function Workspace() {
      .catch(() => { if (!abort.signal.aborted) setReviewCount(null); });
    return () => abort.abort();
  }, [activeTab, reviewVersion]);
+ if (peerWindow) {
+   return <main className="mx-auto min-h-screen max-w-[1440px] bg-slate-50 px-4 py-6 text-slate-900 sm:px-6">
+     <PeerPerformance />
+   </main>;
+ }
+ if (mailWindow) {
+   return <main className="mx-auto min-h-screen max-w-[1440px] bg-slate-50 px-4 py-8 text-slate-900 sm:px-6">
+     <AIMailInbox initialQueue={purchaseHistoryParams.get('queue')} />
+   </main>;
+ }
  if (priceWindow) {
    return <main className="mx-auto min-h-screen max-w-[1440px] bg-slate-50 px-4 py-8 text-slate-900 sm:px-6">
      <PurchasePriceHistory revision={reviewVersion} />

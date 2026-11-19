@@ -42,9 +42,20 @@ API 문서: http://127.0.0.1:8001/docs
 python -c "from app.features.purchases.router import init_db; init_db()"
 ```
 
-**AI 문서**에서 매입 세금계산서와 거래명세서를 불러온 뒤, 상세의 **증빙 대조**에서 후보와 금액을 확인하고 **연결 확정** 또는 **연결 해제**를 누릅니다. 후보 날짜 범위는 `backend/app/features/purchases/matching.py`의 `MATCH_DATE_WINDOW_DAYS`에서 조정합니다. 동일 파일이나 승인번호는 **기존 증빙 보기**로 열 수 있으며, 거래처·날짜·금액만 일치하면 별도 거래인지 확인한 뒤 등록할 수 있습니다.
+**AI 업무지원**에서 매입 세금계산서와 거래명세서를 불러온 뒤, 상세의 **증빙 대조**에서 후보와 금액을 확인하고 **연결 확정** 또는 **연결 해제**를 누릅니다. 후보 날짜 범위는 `backend/app/features/purchases/matching.py`의 `MATCH_DATE_WINDOW_DAYS`에서 조정합니다. 동일 파일이나 승인번호는 **기존 증빙 보기**로 열 수 있으며, 거래처·날짜·금액만 일치하면 별도 거래인지 확인한 뒤 등록할 수 있습니다.
 
 기본 SQLite DB를 사용하는 개인 PC 개발 서버에서 인증 연동 없이 조회하려면 `backend`에서 서버를 시작할 PowerShell에 **매입 단가 이력**은 `$env:AUTOFLOW_LOCAL_PRICE_HISTORY = '1'`, **미처리 증빙함**은 `$env:AUTOFLOW_LOCAL_PURCHASE_INBOX = '1'`을 설정합니다. `python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --no-proxy-headers`로 실행합니다. 확인 메모와 공유 서버에서는 사용자 및 증빙 접근 권한을 확인하는 기존 서버 연동을 사용합니다.
+
+### AI 메일 업무함의 회사 메일 연결 준비
+
+업무함을 열면 시연용 회사 받은편지함의 읽지 않은 메일 30건을 볼 수 있습니다. **최근 30일**과 **30일 이전**으로 나눠 조회할 수 있고, **시연 메일 가져오기**로 같은 받은편지함을 다시 조회합니다. 회사 메일 제공사가 확인되면 한 제공사의 OAuth 웹 앱과 테스트 사서함 한 개를 연결합니다. 서버에서 확인한 AutoFlow 사용자·조직 식별자, 테스트 계정 허용 목록, 등록할 콜백 주소가 필요합니다. 클라이언트 시크릿과 토큰은 서버의 비밀 저장소 또는 암호화 저장소에서 관리할 수 있어야 합니다. AI 분석은 회사가 해당 테스트 계정과 본문 전송을 허용한 경우에만 켭니다.
+
+- Google Workspace를 쓰는 경우 회사 도메인, Gmail API를 활성화한 Cloud 프로젝트, OAuth 웹 클라이언트 ID·시크릿과 동의 설정이 필요합니다. 본문 조회 권한은 `https://www.googleapis.com/auth/gmail.readonly`를 사용합니다. [Gmail OAuth 설정](https://developers.google.com/workspace/gmail/api/auth/web-server) · [Gmail API 권한](https://developers.google.com/workspace/gmail/api/auth/scopes)
+- Microsoft 365를 쓰는 경우 회사 Entra 테넌트 ID, 웹 앱 등록의 클라이언트 ID·시크릿과 조직의 동의 설정이 필요합니다. 로그인한 계정의 본문 조회는 Microsoft Graph 위임 권한 `Mail.Read`를 사용합니다. [Entra 앱 등록](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app) · [Microsoft Graph 권한](https://learn.microsoft.com/en-us/graph/permissions-reference#mailread)
+
+`company_mail.py`에는 최근 30일·최대 50건 조회 규칙과 계정별 중복 키, 원본 읽음 상태와 업무 상태, 원문 변경 확인용 해시가 있습니다. 제공사 연결을 추가할 때 DB에서 계정 키와 제공사 메일 ID 조합의 고유 제약과 트랜잭션을 적용해야 합니다.
+
+시연 메일 상세에서 답장 초안을 만들고 편집하거나 복사할 수 있습니다. `OPENAI_API_KEY`와 `MAIL_AI_MODEL`이 설정되면 AI가 해당 시연 대화를 참고해 초안 유형을 선택합니다. 업무 기록과 변경 내역은 브라우저의 시연 세션별로 저장합니다. 백엔드 시작 시 기존 DB에 `demo_mail_sessions`와 `demo_mail_work` 테이블이 추가됩니다.
 - docs/: planning, design, implementation, deployment
 - .github/workflows/: 프런트엔드 빌드 및 Python 구문 검사 CI
 
@@ -55,13 +66,20 @@ python -c "from app.features.purchases.router import init_db; init_db()"
 
 ## 구매 증빙 처리 (Windows PowerShell)
 
-**AI 문서** 메뉴에서 **매입 세금계산서**와 **거래명세서** 탭에는 PDF를, **구매 영수증** 탭에는 JPG·JPEG·PNG를 업로드합니다. 여러 파일을 한 번에 선택하면 파일별 처리 결과를 확인할 수 있습니다. 목록에서 각 파일을 열고 원본과 추출값을 비교한 뒤 개별적으로 **임시저장**하거나 **승인 및 저장**합니다. 상단의 **처리 이력 열기**를 누르면 별도 브라우저 창에서 세 문서 유형을 함께 조회합니다. 등록 기간(KST), 거래처, 문서 유형, 처리 상태로 필터링할 수 있으며 **엑셀 다운로드**는 적용된 필터를 사용합니다.
+**AI 업무지원** 메뉴에서 **매입 세금계산서**와 **거래명세서** 탭에는 PDF를, **구매 영수증** 탭에는 JPG·JPEG·PNG를 업로드합니다. 여러 파일을 한 번에 선택하면 파일별 처리 결과를 확인할 수 있습니다. 목록에서 각 파일을 열고 원본과 추출값을 비교한 뒤 개별적으로 **임시저장**하거나 **승인 및 저장**합니다. 상단의 **처리 이력 열기**를 누르면 별도 브라우저 창에서 세 문서 유형을 함께 조회합니다. 등록 기간(KST), 거래처, 문서 유형, 처리 상태로 필터링할 수 있으며 **엑셀 다운로드**는 적용된 필터를 사용합니다.
 
 거래명세서는 거래처와 작성일자, 품목별 품목명·수량·단가를 확인합니다. 원본에 명세서 번호나 합계금액이 있으면 함께 입력할 수 있습니다. 엑셀의 **거래명세서 품목** 시트에서 품목별 수량과 단가를 숫자 셀로 확인할 수 있습니다.
 
 메뉴의 숫자는 모든 증빙 유형의 검토 대기 건수를 합한 값입니다. **검토 대기함**을 누르면 해당 기록만 조회합니다. **임시저장**으로 빈 항목이 있는 상태에서도 수정값을 저장할 수 있으며, 대기함에서 기록을 다시 열어 검토를 이어갈 수 있습니다.
 
 처리 이력의 **등록일시** 오른쪽 **삭제** 버튼으로 검토 대기 건과 승인 완료 건을 휴지통에 보낼 수 있습니다. **휴지통**에서 기록을 열어 **복원**하면 원본과 저장된 값이 유지되고 이전 처리 상태로 돌아갑니다. 휴지통 기록은 일반 이력과 엑셀에서 제외되며, 같은 파일을 다시 올리면 기존 기록을 열어 복원할 수 있습니다.
+
+### 동종업체 실적 비교
+
+- **AI 업무지원 → 동종업체 실적 비교**에서 ISC와 비교업체 4곳의 2023~2025년 기업 전체 공시 실적을 조회합니다. 연결과 별도 재무제표는 각각 선택해 조회합니다.
+- 백엔드 프로세스에 `OPENDART_API_KEY`를 설정하고 재시작합니다. 값은 프런트엔드 환경변수에 넣지 않습니다. [OpenDART 재무제표 API 안내](https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS003&apiId=2019020)
+- AI 요약 편집을 사용하려면 백엔드에 `OPENAI_API_KEY`와 `PEER_AI_MODEL`을 설정합니다. AI 설정이나 호출에 문제가 있으면 서버가 계산한 수치 요약을 표시합니다.
+- 정상 조회와 공시 없음 결과는 백엔드 프로세스에서 최대 6시간 캐시합니다. 그래프와 표의 금액은 억 원으로 표시합니다.
 
 ### 휴대폰에서 QR로 영수증 보내기
 
@@ -73,7 +91,7 @@ python -c "from app.features.purchases.router import init_db; init_db()"
 .\.venv\Scripts\python.exe -m uvicorn app.features.purchases.mobile:mobile_app --host 192.168.1.10 --port 8010
 ```
 
-PC의 **AI 문서 → 구매 영수증 → 휴대폰으로 올리기**에서 QR을 스캔합니다. 갤러리에서 여러 장을 고르거나 카메라로 차례로 찍고 **PC로 전송**을 누릅니다. QR 하나로 최대 20장(파일당 10 MB)을 보낼 수 있습니다. PC에서 사진별 결과를 확인하고 각각 검토하거나, 검토 대기함에서 다시 열 수 있습니다. QR은 5분 동안 유효하며 한 장이라도 처리에 성공하면 소진됩니다.
+PC의 **AI 업무지원 → 구매 영수증 → 휴대폰으로 올리기**에서 QR을 스캔합니다. 갤러리에서 여러 장을 고르거나 카메라로 차례로 찍고 **PC로 전송**을 누릅니다. QR 하나로 최대 20장(파일당 10 MB)을 보낼 수 있습니다. PC에서 사진별 결과를 확인하고 각각 검토하거나, 검토 대기함에서 다시 열 수 있습니다. QR은 5분 동안 유효하며 한 장이라도 처리에 성공하면 소진됩니다.
 
 휴대폰 서버는 영수증 사진 전송 화면만 제공하며 PC 백엔드와 Vite는 기존 루프백 주소를 사용합니다. 예시의 HTTP 주소는 신뢰하는 내부 네트워크에서 사용합니다. 휴대폰에서 접속이 차단되면 사내 Wi-Fi의 기기 간 연결 정책과 Windows 방화벽의 TCP 8010 인바운드 정책을 확인합니다. HTTPS를 제공하는 내부 프록시가 있다면 해당 접속 주소를 `RECEIPT_MOBILE_URL`에 설정합니다.
 
