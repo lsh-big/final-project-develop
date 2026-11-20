@@ -32,7 +32,7 @@ def fake_reports(monkeypatch):
         if corp == codes["080580"] and year == 2025 and basis == "CFS":
             return b'{"status":"800"}'
         revenue = {2022: 10, 2023: 0, 2024: 100, 2025: 125}[year]
-        if corp == codes["058470"] and year == 2025:
+        if corp == codes["425420"] and year == 2025:
             revenue = 150
         if basis == "OFS":
             revenue *= 2
@@ -59,6 +59,8 @@ def test_annual_comparison_is_cached_and_keeps_statement_bases_separate(monkeypa
         data = response.json()
         rows = {(row["code"], row["year"]): row for row in data["rows"]}
         assert len(rows) == 15 and data["last_fetched_at"]
+        assert rows[("425420", 2025)]["name"] == "티에프이"
+        assert not any(code == "058470" for code, _ in rows)
         assert not any(year == 2022 for _, year in rows)
         assert len(calls) == 21 and any(params.get("bsns_year") == 2022 for _, params in calls)
         assert rows[(peer.ISC, 2023)]["revenue"] == 0

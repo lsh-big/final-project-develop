@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 
 router = APIRouter(prefix="/peer-performance", tags=["peer performance"])
-COMPANIES = {"095340": "ISC", "058470": "리노공업", "098120": "마이크로컨텍솔", "080580": "오킨스전자", "131290": "티에스이"}
+COMPANIES = {"095340": "ISC", "425420": "티에프이", "098120": "마이크로컨텍솔", "080580": "오킨스전자", "131290": "티에스이"}
 ISC = "095340"
 ANNUAL_REPORT = "11011"
 Basis = Literal["CFS", "OFS"]

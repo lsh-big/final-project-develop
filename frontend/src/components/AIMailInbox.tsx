@@ -172,6 +172,11 @@ export function AIMailInbox({ initialQueue }: { initialQueue?: string | null }) 
   const urgentCount = queueRows.filter((row) => row.urgent).length;
   const overdueCount = queueRows.filter((row) => row.overdue).length;
   const rows = queueFilter === 'all' ? searchedRows : queueRows.filter((row) => row[queueFilter]);
+  const priorityMails = showAll ? [] : queueRows.flatMap((row) => {
+    if ((!row.overdue && !row.urgent) || (queueFilter !== 'all' && !row[queueFilter])) return [];
+    const analysis = availableAnalysis(row.mail);
+    return analysis?.deadline ? [{ ...row, analysis, deadline: analysis.deadline }] : [];
+  }).sort((left, right) => left.deadline.localeCompare(right.deadline)).slice(0, 3);
   const conversationCount = new Set(rows.map((row) => row.thread.id)).size;
   const groups = groupVendors(rows);
   const mails = inbox && showAll ? matchingMail(inbox, period, selectedVendor)
@@ -310,7 +315,31 @@ export function AIMailInbox({ initialQueue }: { initialQueue?: string | null }) 
               </dd>
             </div>
           </dl>}
+          {!showAll && total > 0 && (
+            <section aria-label="먼저 확인할 메일" className="rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2">
+              <h2 className="text-sm font-semibold text-slate-900">먼저 확인할 메일</h2>
+              {priorityMails.length ? (
+                <ul className="mt-1 divide-y divide-amber-200">
+                  {priorityMails.map(({ mail, thread, analysis, overdue, urgent }) => (
+                    <li key={mail.id}>
+                      <button type="button" aria-expanded={selectedMail === mail.id} onClick={() => openMail(thread, mail)}
+                        className="grid w-full min-w-0 items-baseline gap-x-2 gap-y-0.5 rounded px-1 py-1.5 text-left text-xs hover:bg-amber-100 focus-visible:outline-blue-700 sm:grid-cols-[minmax(0,1fr)_auto] sm:text-sm">
+                        <span className="min-w-0 break-words text-slate-800">
+                          <span className="font-semibold text-blue-900">{mail.vendor?.name || mail.sender}</span>
+                          {' · '}{firstSentence(analysis.request ?? '') || briefAnalysis(analysis) || mail.subject}
+                        </span>
+                        <span className="text-xs text-slate-700">회신 기한 · <Deadline analysis={analysis} overdue={overdue} soon={urgent} /></span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : <p className="mt-1 text-xs text-slate-600">현재 조회 범위에 회신 기한이 지났거나 임박한 메일이 없습니다.</p>}
+            </section>
+          )}
           <div ref={listRef} className="scroll-mt-4" />
+          {!showAll && total > 0 && <p className="text-xs text-slate-600">
+            읽지 않은 메일을 거래처와 받은 날짜별로 묶었습니다. 제목을 누르면 원문을 보고 답장을 작성할 수 있습니다.
+          </p>}
           {!total && <p className="text-sm text-slate-600">{workFilter === 'all' ? '해당하는 메일이 없습니다.' : '선택한 조건에 해당하는 메일이 없습니다.'}</p>}
           {showAll ? <div className="divide-y divide-slate-200 rounded-lg border border-slate-200" aria-label="날짜별 전체 메일">
             {[...dated.entries()].map(([day, entries]) => (
