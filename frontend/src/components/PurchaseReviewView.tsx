@@ -146,8 +146,6 @@ type UploadItem =
 export type PurchaseReviewProps = {
   reviewCount: number | null;
   onReviewCountChange: () => void;
-  workspaceAction?: ReactNode;
-  workspaceOverview?: ReactNode;
   historyWindow?: boolean;
   initialStatus?: string | null;
   initialRecord?: string | null;
@@ -178,7 +176,7 @@ function PopupWindowLink({ href, children, icon: Icon, className = '' }: {
 }
 
 export function PurchaseReviewView({
-  reviewCount, onReviewCountChange, workspaceAction, workspaceOverview, historyWindow = false, initialStatus, initialRecord, initialKind, reviewRevision = 0,
+  reviewCount, onReviewCountChange, historyWindow = false, initialStatus, initialRecord, initialKind, reviewRevision = 0,
 }: PurchaseReviewProps) {
   const [kind, setKind] = useState<PurchaseKind>('document');
   const [reviews, setReviews] = useState<Record<string, Review>>({});
@@ -541,14 +539,16 @@ export function PurchaseReviewView({
     || (kind === 'statement' && Boolean(firstMissingItemInput(items)));
 
   return (
-    <section className="space-y-6">
-      <header className={`flex flex-wrap justify-between gap-3 ${workspaceAction ? 'items-center' : 'items-start'}`}>
+    <section id={historyWindow ? undefined : 'purchase-evidence'} aria-labelledby="purchase-review-heading"
+      tabIndex={historyWindow ? undefined : -1}
+      className={`space-y-6 ${historyWindow ? '' : 'scroll-mt-48 border-t border-slate-200 pt-6 xl:scroll-mt-32'}`}>
+      <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-1">
-          <h1 className="text-2xl font-bold">{historyWindow ? '처리 이력' : '구매 증빙 처리'}</h1>
+          {historyWindow
+            ? <h1 id="purchase-review-heading" className="text-2xl font-bold">처리 이력</h1>
+            : <h2 id="purchase-review-heading" className="text-xl font-bold">구매 증빙 처리</h2>}
           {!historyWindow && <p className="text-sm text-slate-600">구매 증빙을 업로드하고 원본과 추출값을 대조해 승인합니다.</p>}
         </div>
-        {workspaceAction}
-        {workspaceOverview}
         {historyWindow ? (
           <div className="flex flex-wrap gap-2">
             <button className={secondary} type="button" onClick={() => openHistory('review')}>
@@ -561,7 +561,7 @@ export function PurchaseReviewView({
           </div>
         ) : (
           <nav aria-labelledby="purchase-shortcuts-heading" className="flex w-full flex-wrap items-center gap-x-3 rounded-lg border border-slate-200 bg-white px-2 py-1">
-            <h2 id="purchase-shortcuts-heading" className="w-full px-2 pt-1 text-xs font-semibold text-slate-600 lg:w-auto lg:pt-0">증빙함 바로가기</h2>
+            <h3 id="purchase-shortcuts-heading" className="w-full px-2 pt-1 text-xs font-semibold text-slate-600 lg:w-auto lg:pt-0">증빙함 바로가기</h3>
             <PopupWindowLink href="?view=purchase-history&status=review" icon={ClipboardCheck}>
               검토 대기함
               {reviewCount !== null && (
@@ -579,7 +579,7 @@ export function PurchaseReviewView({
       </header>
       {!historyWindow && <>
         <div className="space-y-2">
-          <h2 id="purchase-types-heading" className="text-sm font-semibold text-slate-800">업로드할 증빙 선택</h2>
+          <h3 id="purchase-types-heading" className="text-sm font-semibold text-slate-800">업로드할 증빙 선택</h3>
           <div role="group" aria-labelledby="purchase-types-heading" className="grid gap-2 sm:grid-cols-3 sm:gap-3">
             {uploadKinds.map((option) => {
               const { label, format, icon: Icon } = uploadTypes[option];

@@ -74,7 +74,7 @@ export function PurchaseInbox({ revision }: { revision: number }) {
           <h1 className="text-2xl font-bold">미처리 증빙함</h1>
           <p className="mt-1 text-sm text-slate-600">증빙일은 세금계산서 작성일 또는 거래명세서 납품일입니다. 연결된 건은 작성일을, 증빙일이 없으면 등록일을 사용합니다.</p>
         </div>
-        <a className={button} href="?tab=doc-ai">구매 증빙 처리</a>
+        <a className={button} href="?tab=doc-ai#purchase-evidence">구매 증빙 처리</a>
       </header>
       <form className="grid items-end gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]"
         onSubmit={(event) => {

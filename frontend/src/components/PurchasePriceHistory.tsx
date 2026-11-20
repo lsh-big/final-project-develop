@@ -110,7 +110,7 @@ export function PurchasePriceHistory({ revision }: { revision: number }) {
           <h1 className="text-2xl font-bold">매입 단가 이력</h1>
           <p className="mt-1 text-sm text-slate-600">승인된 거래명세서를 납품일 기준으로 비교합니다. 납품일이 없는 기록은 등록일로 조회하며 비교 자료 부족으로 표시합니다.</p>
         </div>
-        <a className={button} href="?tab=doc-ai">구매 증빙 처리</a>
+        <a className={button} href="?tab=doc-ai#purchase-evidence">구매 증빙 처리</a>
       </header>
       {data && (
         <section aria-label="최근 30일 단가 변동" className="space-y-2">

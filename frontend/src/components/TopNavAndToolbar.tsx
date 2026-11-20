@@ -102,7 +102,7 @@ export const TopNavAndToolbar: React.FC<{ reviewCount: number | null }> = ({ rev
                 className="w-6 h-6 rounded-full object-cover"
               />
               <span className="text-xs font-medium text-slate-800">{currentUser.name}</span>
-              <span className="text-xs font-mono text-slate-500">· {effectiveRole}</span>
+              <span className="hidden font-mono text-xs text-slate-500 min-[360px]:inline">· {effectiveRole}</span>
             </button>
           ) : (
             <button
@@ -159,7 +159,7 @@ export const TopNavAndToolbar: React.FC<{ reviewCount: number | null }> = ({ rev
             <div
               role="group"
               aria-label="시장 국면 시뮬레이션"
-              className="inline-flex items-center gap-1 p-0.5 bg-slate-200/70 rounded-lg"
+              className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg bg-slate-200/70 p-0.5"
             >
               {REGIME_OPTIONS.map((opt) => (
                 <button
