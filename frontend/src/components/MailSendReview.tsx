@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { apiUrl, request } from '../services/api.js';
+import { apiFetch, request } from '../services/api.js';
 
 export type ReplyEnvelope = { sender: string; recipient: string; subject: string };
 type Reply = ReplyEnvelope & { message_id: string; text: string };
@@ -46,7 +46,7 @@ export function MailSendReview({ path, reply }: { path: string; reply?: Reply })
     setError('');
     try {
       const { request_id, message_id, text } = review;
-      const response = await fetch(apiUrl(path), {
+      const response = await apiFetch(path, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ request_id, message_id, text }), signal: AbortSignal.timeout(12000),
       });

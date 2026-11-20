@@ -113,6 +113,27 @@ def test_local_dev_proxy_accepts_only_same_origin_browser_requests(client):
         assert local.post(THREAD + "/draft", json=draft, headers={**headers, "Origin": "https://other.example"}).status_code == 403
 
 
+def test_configured_frontend_uses_an_isolated_cookie_free_demo_session(client, monkeypatch):
+    origin = "https://workspace.example"
+    monkeypatch.setenv("AUTOFLOW_FRONTEND_ORIGINS", origin)
+    local = client.get(WORK)
+    headers = {"Origin": origin, "Sec-Fetch-Site": "cross-site"}
+    draft = {"message_id": "demo-01-1"}
+    assert "demo_session_token" not in local.json()
+    assert client.post(THREAD + "/draft", json=draft, headers=headers).status_code == 403
+
+    remote = client.get(WORK, headers=headers)
+    assert remote.status_code == 200 and "set-cookie" not in remote.headers
+    assert remote.json()["actor"] != local.json()["actor"]
+    headers["Authorization"] = "Bearer " + remote.json()["demo_session_token"]
+    assert client.post(THREAD + "/draft", json=draft, headers=headers).status_code == 200
+    current = client.get(WORK, headers=headers).json()
+    assert current == {"actor": remote.json()["actor"], "threads": {}}
+    untrusted = {**headers, "Origin": "https://other.example"}
+    assert client.get(WORK, headers=untrusted).status_code == 403
+    assert client.post(THREAD + "/draft", json=draft, headers=untrusted).status_code == 403
+
+
 def test_draft_ai_can_select_only_an_allowed_reply_template(client, monkeypatch):
     monkeypatch.setattr(mail_work, "analysis_config", lambda: ("test-key", "test-model"))
     outputs = [{"style": "clarify"}, {"style": "follow_up", "body": "납기를 확정했고 첨부를 완료했습니다."}]

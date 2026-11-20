@@ -14,6 +14,7 @@ from sqlalchemy import JSON, Integer, String, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.frontend_origins import frontend_origins
 from app.db import Base
 from .mail_demo import demo_mail_messages
 from .mail_inbox import analysis_config, local_today
@@ -71,8 +72,18 @@ class SendRequest(BaseModel):
     text: str = Field(min_length=1, max_length=12000)
 
 
+def remote_frontend(request):
+    origin = request.headers.get("origin")
+    return origin in frontend_origins() and origin != f"{request.url.scheme}://{request.url.netloc}"
+
+
 def session_id(request, db):
-    token = request.cookies.get(COOKIE, "")
+    if remote_frontend(request):
+        scheme, _, token = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() != "bearer":
+            return None
+    else:
+        token = request.cookies.get(COOKIE, "")
     if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
         return None
     digest = sha256(token.encode("ascii")).hexdigest()
@@ -80,6 +91,8 @@ def session_id(request, db):
 
 
 def verify_browser(request):
+    if remote_frontend(request):
+        return
     origin = request.headers.get("origin")
     fetch_site = request.headers.get("sec-fetch-site")
     loopback = {"127.0.0.1", "::1", "localhost"}
@@ -132,18 +145,24 @@ def work_snapshot(row):
 @router.get("")
 def list_work(request: Request, response: Response):
     response.headers["Cache-Control"] = "no-store"
-    if request.headers.get("sec-fetch-site") == "cross-site":
+    remote = remote_frontend(request)
+    if not remote and request.headers.get("sec-fetch-site") == "cross-site":
         raise HTTPException(403, "다른 사이트에서는 메일 업무 기록을 조회할 수 없습니다.")
     with purchases.Session.begin() as db:
         owner = session_id(request, db)
+        remote_session = {}
         if owner is None:
             token = token_urlsafe(32)
             owner = sha256(token.encode("ascii")).hexdigest()
             db.add(DemoMailSession(id=owner))
-            response.set_cookie(COOKIE, token, path=COOKIE_PATH, httponly=True,
-                                secure=request.url.scheme == "https", samesite="strict")
+            if remote:
+                remote_session = {"demo_session_token": token}
+            else:
+                response.set_cookie(COOKIE, token, path=COOKIE_PATH, httponly=True,
+                                    secure=request.url.scheme == "https", samesite="strict")
         rows = db.scalars(select(DemoMailWork).where(DemoMailWork.session_id == owner))
-        return {"actor": f"시연 사용자 {owner[:8]}", "threads": {row.thread_id: work_snapshot(row) for row in rows}}
+        return {"actor": f"시연 사용자 {owner[:8]}", "threads": {row.thread_id: work_snapshot(row) for row in rows},
+                **remote_session}
 
 
 @router.put("/{thread_id}")

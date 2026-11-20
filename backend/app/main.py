@@ -1,6 +1,9 @@
 from contextlib import asynccontextmanager
+import os
 
 from fastapi import APIRouter, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.core.frontend_origins import frontend_origins
 from app.features.trends.router import router as trends_router
 from app.features.finance.router import router as finance_router
 from app.features.receipts.router import router as receipts_router
@@ -26,14 +29,21 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Final Project API", lifespan=lifespan)
-for router in (trends_router, finance_router, receipts_router, documents_router, statements_router):
+public_demo = os.getenv("AUTOFLOW_PUBLIC_DEMO") == "1"
+origins = frontend_origins()
+if origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+for router in (trends_router, finance_router, mail_inbox_router, mail_work_router, peer_performance_router):
     app.include_router(router, prefix="/api/v1")
-app.include_router(control_router, prefix="/api/v1/receipts")
-app.include_router(purchase_inbox_router, prefix="/api/v1")
-app.include_router(purchase_price_router, prefix="/api/v1")
-app.include_router(mail_inbox_router, prefix="/api/v1")
-app.include_router(mail_work_router, prefix="/api/v1")
-app.include_router(peer_performance_router, prefix="/api/v1")
+if not public_demo:
+    for router in (receipts_router, documents_router, statements_router, purchase_inbox_router, purchase_price_router):
+        app.include_router(router, prefix="/api/v1")
+    app.include_router(control_router, prefix="/api/v1/receipts")
 
 
 @app.get("/api/health")

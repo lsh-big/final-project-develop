@@ -3,7 +3,7 @@ import { PlatformProvider, usePlatform } from './context/PlatformContext';
 import { TopNavAndToolbar } from './components/TopNavAndToolbar';
 import { AuthModal } from './components/AuthModal';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { request } from './services/api.js';
+import { publicDemo, request } from './services/api.js';
 import { ValidationToasts } from './components/ValidationToasts';
 import DashboardPage from './pages/DashboardPage.jsx';
 import TrendPage from './pages/TrendPage.jsx';
@@ -52,6 +52,7 @@ function Workspace() {
    };
  }, []);
  useEffect(() => {
+   if (publicDemo) return;
    const abort = new AbortController();
    request('/api/v1/documents/review-count', { signal: abort.signal })
      .then(({ count }) => { if (!abort.signal.aborted) setReviewCount(count); })
@@ -66,6 +67,13 @@ function Workspace() {
  if (mailWindow) {
    return <main className="mx-auto min-h-screen max-w-[1440px] bg-slate-50 px-4 py-8 text-slate-900 sm:px-6">
      <AIMailInbox initialQueue={purchaseHistoryParams.get('queue')} />
+   </main>;
+ }
+ if (publicDemo && (priceWindow || inboxWindow || historyWindow)) {
+   return <main className="mx-auto max-w-2xl space-y-3 px-4 py-8 text-slate-900">
+     <h1 className="text-xl font-bold">증빙 업무</h1>
+     <p>증빙 업로드와 처리 이력은 팀 업무 환경에서 사용할 수 있습니다.</p>
+     <a href="?tab=doc-ai" className="text-blue-800 underline">AI 업무지원으로 돌아가기</a>
    </main>;
  }
  if (priceWindow) {
@@ -96,10 +104,10 @@ function Workspace() {
    <footer className="border-t border-slate-200 bg-white px-4 py-5 text-xs text-slate-600">
      <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-4"><span>DataPulse AI · AutoFlow 통합 워크스페이스</span>
      <nav aria-label="기존 AutoFlow 화면" className="flex flex-wrap gap-4">
-       <a href="/legacy/index.html" target="_blank" rel="noreferrer">기존 대시보드 ↗</a>
-       <a href="/legacy/upload.html" target="_blank" rel="noreferrer">기존 문서 업로드 ↗</a>
-       <a href="/legacy/history.html" target="_blank" rel="noreferrer">기존 처리 이력 ↗</a>
-       <a href="/legacy/admin_rpa.html" target="_blank" rel="noreferrer">기존 RPA ↗</a>
+       <a href={`${import.meta.env.BASE_URL}legacy/index.html`} target="_blank" rel="noreferrer">기존 대시보드 ↗</a>
+       <a href={`${import.meta.env.BASE_URL}legacy/upload.html`} target="_blank" rel="noreferrer">기존 문서 업로드 ↗</a>
+       <a href={`${import.meta.env.BASE_URL}legacy/history.html`} target="_blank" rel="noreferrer">기존 처리 이력 ↗</a>
+       <a href={`${import.meta.env.BASE_URL}legacy/admin_rpa.html`} target="_blank" rel="noreferrer">기존 RPA ↗</a>
      </nav></div>
    </footer>
    <AuthModal /><ValidationToasts />

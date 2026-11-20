@@ -1,6 +1,6 @@
 import { ArrowRight, ClipboardCheck, Clock, Mail } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { request } from '../services/api.js';
+import { publicDemo, request } from '../services/api.js';
 import { latestByConversation, mailInboxEndpoint, scopeRows, type Inbox } from '../services/mailInbox';
 import { mailWorkEndpoint, type MailWorkOverview } from './MailWorkflow';
 
@@ -26,7 +26,7 @@ export function TodayWorkOverview({ reviewCount, revision }: { reviewCount: numb
   }, [revision]);
 
   const cards = [
-    { label: '증빙 검토 대기', count: reviewCount, href: '?view=purchase-history&status=review', icon: ClipboardCheck },
+    ...(!publicDemo ? [{ label: '증빙 검토 대기', count: reviewCount, href: '?view=purchase-history&status=review', icon: ClipboardCheck }] : []),
     { label: '답장 필요', count: mailCounts?.reply, href: '?view=ai-mail&queue=reply', icon: Mail },
     { label: '회신 기한 임박', count: mailCounts?.urgent, href: '?view=ai-mail&queue=urgent', icon: Clock, urgent: true },
   ];
@@ -37,7 +37,7 @@ export function TodayWorkOverview({ reviewCount, revision }: { reviewCount: numb
         <h2 id="today-work-heading" className="text-sm font-semibold text-slate-900">오늘 확인할 업무</h2>
         <p className="text-xs text-slate-600">메일은 읽지 않은 대화 기준 · 기한 임박은 오늘부터 3일 이내</p>
       </div>
-      <div className="grid grid-cols-3 gap-1.5 sm:gap-2">
+      <div className={`grid gap-1.5 sm:gap-2 ${publicDemo ? 'grid-cols-2' : 'grid-cols-3'}`}>
         {cards.map(({ label, count, href, icon: Icon, urgent }) => (
           <a key={label} href={href} className="grid min-w-0 grid-cols-[1fr_auto] items-center gap-x-1 rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-700 hover:border-blue-300 hover:bg-blue-50 focus-visible:outline-blue-700">
             <span className="flex min-w-0 items-center gap-1 text-xs font-semibold sm:text-sm">

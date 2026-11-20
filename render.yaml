@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: autoflow-public-demo-api
+    runtime: docker
+    plan: free
+    branch: develop
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: '8001'
+      - key: AUTOFLOW_PUBLIC_DEMO
+        value: '1'
+      - key: AUTOFLOW_FRONTEND_ORIGINS
+        value: https://lsh-big.github.io
+      - key: OPENDART_API_KEY
+        sync: false
