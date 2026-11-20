@@ -146,6 +146,7 @@ type UploadItem =
 export type PurchaseReviewProps = {
   reviewCount: number | null;
   onReviewCountChange: () => void;
+  onProcessingCountChange?: (count: number) => void;
   historyWindow?: boolean;
   initialStatus?: string | null;
   initialRecord?: string | null;
@@ -176,7 +177,8 @@ function PopupWindowLink({ href, children, icon: Icon, className = '' }: {
 }
 
 export function PurchaseReviewView({
-  reviewCount, onReviewCountChange, historyWindow = false, initialStatus, initialRecord, initialKind, reviewRevision = 0,
+  reviewCount, onReviewCountChange, onProcessingCountChange, historyWindow = false,
+  initialStatus, initialRecord, initialKind, reviewRevision = 0,
 }: PurchaseReviewProps) {
   const [kind, setKind] = useState<PurchaseKind>('document');
   const [reviews, setReviews] = useState<Record<string, Review>>({});
@@ -184,7 +186,14 @@ export function PurchaseReviewView({
   const selectedId = selected[kind];
   const { record, draft = {}, page = 1, confirmedType, items = [] } = (selectedId && reviews[selectedId]) || {};
   const [batches, setBatches] = useState<Partial<Record<PurchaseKind, UploadItem[]>>>({});
+  const [mobileProcessing, setMobileProcessing] = useState(false);
   const batch = batches[kind] ?? [];
+  const desktopProcessing = Object.values(batches).some((items) => items?.some(({ state }) => state === 'uploading'));
+  const processingCount = Number(desktopProcessing) + Number(mobileProcessing);
+  useEffect(() => {
+    onProcessingCountChange?.(processingCount);
+  }, [onProcessingCountChange, processingCount]);
+  useEffect(() => () => onProcessingCountChange?.(0), [onProcessingCountChange]);
   const batchRequest = useRef<AbortController | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const [draggingFiles, setDraggingFiles] = useState(false);
@@ -641,7 +650,7 @@ export function PurchaseReviewView({
               void upload(files);
             }} />
           <div hidden={!isReceipt}>
-            <MobileReceiptUpload disabled={busy} onReceived={receiveMobileReceipt}
+            <MobileReceiptUpload disabled={busy} onReceived={receiveMobileReceipt} onProcessingChange={setMobileProcessing}
               onOpen={(id) => void open(`${purchaseApi('receipt')}/${id}`)} />
           </div>
           {busy && !batch.some(({ state }) => state === 'waiting' || state === 'uploading')

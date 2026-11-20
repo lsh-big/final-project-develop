@@ -461,8 +461,19 @@ def attach_routes(router: APIRouter, kind: str):
         return await run_in_threadpool(store_upload, kind, filename, content, confirm_suspected)
 
     @router.get("/review-count")
-    def review_count():
+    def review_count(include_completed: bool = False):
         with Session() as db:
+            if include_completed:
+                today = datetime.combine(korea_now().date(), time.min)
+                counts = dict(db.execute(
+                    select(PurchaseRecord.status, func.count()).where(or_(
+                        PurchaseRecord.status == "review",
+                        (PurchaseRecord.status == "approved")
+                        & (PurchaseRecord.approved_at >= today)
+                        & (PurchaseRecord.approved_at < today + timedelta(days=1)),
+                    )).group_by(PurchaseRecord.status)
+                ).all())
+                return {"count": counts.get("review", 0), "completed_today": counts.get("approved", 0)}
             return {"count": db.scalar(
                 select(func.count()).select_from(PurchaseRecord).where(PurchaseRecord.status == "review")
             )}

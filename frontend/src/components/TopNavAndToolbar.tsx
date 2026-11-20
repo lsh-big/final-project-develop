@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Menu, X } from 'lucide-react';
+import { ArrowRight, Menu, X } from 'lucide-react';
 import { usePlatform } from '../context/PlatformContext';
 import { MARKET_REGIMES } from '../data/mockDb';
+import { publicDemo } from '../services/api.js';
 import { AppTab, MarketRegime, UserRole } from '../types/platform';
 import { ResilientImage } from './ResilientImage';
 
@@ -34,7 +35,34 @@ function ReviewCount({ count }: { count: number | null }) {
   );
 }
 
-export const TopNavAndToolbar: React.FC<{ reviewCount: number | null }> = ({ reviewCount }) => {
+type WorkCounts = { reviewCount: number | null; completedToday: number | null; processingCount: number };
+
+function WorkStatus({ reviewCount, completedToday, processingCount }: WorkCounts) {
+  const reviewLabel = `검토 대기 ${reviewCount === null ? '—' : `${reviewCount}건`}`;
+
+  return (
+    <section aria-label="AI 업무 현황" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+      <span className="font-semibold text-slate-700">AI 업무 현황</span>
+      <span className="text-slate-600">{publicDemo ? '팀 업무 환경에서 집계' : '증빙 인식·검토 현황'}</span>
+      <div className="inline-flex flex-wrap items-center gap-1 tabular-nums">
+        <span className="whitespace-nowrap rounded-md bg-slate-200/70 px-2.5 py-1 text-slate-700" title="한국 시간 기준 오늘 승인된 증빙">
+          오늘 완료 {completedToday === null ? '—' : `${completedToday}건`}
+        </span>
+        <span className="whitespace-nowrap rounded-md bg-slate-200/70 px-2.5 py-1 text-slate-700" title="이 화면에서 진행 중인 증빙 업로드 작업">
+          처리 중 {publicDemo ? '—' : `${processingCount}건`}
+        </span>
+        {publicDemo ? <span className="whitespace-nowrap px-2.5 py-1 text-slate-600">{reviewLabel}</span> : (
+          <a href="?view=purchase-history&status=review" target="_blank" rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-blue-50 px-2.5 py-1 font-semibold text-blue-800 hover:bg-blue-100 focus-visible:outline-2 focus-visible:outline-blue-700">
+            {reviewLabel}<ArrowRight aria-hidden="true" className="size-3" /><span className="sr-only"> (새 탭)</span>
+          </a>
+        )}
+      </div>
+    </section>
+  );
+}
+
+export const TopNavAndToolbar: React.FC<WorkCounts> = ({ reviewCount, completedToday, processingCount }) => {
   const {
     activeTab,
     setActiveTab,
@@ -151,39 +179,42 @@ export const TopNavAndToolbar: React.FC<{ reviewCount: number | null }> = ({ rev
       {/* Workspace Utility Toolbar (below header): Market Regime Context + RBAC Switcher */}
       <div className="bg-slate-50 border-t border-slate-200">
         <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-2 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2.5">
-          {/* Left: Dynamic Market Regime & Key Indices */}
-          <div className="flex flex-wrap items-center gap-3 text-xs">
-            <span className="font-medium text-slate-700 whitespace-nowrap shrink-0">
-              시장·데이터 국면
-            </span>
-            <div
-              role="group"
-              aria-label="시장 국면 시뮬레이션"
-              className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg bg-slate-200/70 p-0.5"
-            >
-              {REGIME_OPTIONS.map((opt) => (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => setMarketRegime(opt.id)}
-                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    marketRegime === opt.id
-                      ? 'bg-white text-slate-900 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
+          {activeTab === 'doc-ai' ? (
+            <WorkStatus reviewCount={reviewCount} completedToday={completedToday} processingCount={processingCount} />
+          ) : (
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <span className="font-medium text-slate-700 whitespace-nowrap shrink-0">
+                시장·데이터 국면
+              </span>
+              <div
+                role="group"
+                aria-label="시장 국면 시뮬레이션"
+                className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg bg-slate-200/70 p-0.5"
+              >
+                {REGIME_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setMarketRegime(opt.id)}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      marketRegime === opt.id
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <div className="hidden xl:flex items-center gap-2 text-xs text-slate-500 font-mono tabular-nums">
+                <span>KOSPI {regimeInfo.kospiIndex}</span>
+                <span aria-hidden="true">·</span>
+                <span>BTC {regimeInfo.btcKrw}</span>
+                <span aria-hidden="true">·</span>
+                <span>ETL {regimeInfo.etlThroughput}</span>
+              </div>
             </div>
-            <div className="hidden xl:flex items-center gap-2 text-xs text-slate-500 font-mono tabular-nums">
-              <span>KOSPI {regimeInfo.kospiIndex}</span>
-              <span aria-hidden="true">·</span>
-              <span>BTC {regimeInfo.btcKrw}</span>
-              <span aria-hidden="true">·</span>
-              <span>ETL {regimeInfo.etlThroughput}</span>
-            </div>
-          </div>
+          )}
 
           {/* Right: RBAC Role Switcher for Instant Access-Control Testing */}
           <div className="flex flex-wrap items-center gap-2.5 text-xs">

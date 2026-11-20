@@ -15,15 +15,21 @@ type Delivery = {
 const sessions = '/api/v1/receipts/mobile-sessions';
 const button = 'rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-50';
 
-export function MobileReceiptUpload({ disabled, onReceived, onOpen }: {
+export function MobileReceiptUpload({ disabled, onReceived, onOpen, onProcessingChange }: {
   disabled: boolean;
   onReceived: () => void;
   onOpen: (recordId: string) => void;
+  onProcessingChange: (processing: boolean) => void;
 }) {
   const [ticket, setTicket] = useState<Ticket | null>(null);
   const [delivery, setDelivery] = useState<Delivery | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  const processing = delivery?.state === 'uploading';
+
+  useEffect(() => {
+    onProcessingChange(processing);
+  }, [onProcessingChange, processing]);
 
   useEffect(() => {
     if (!ticket) return;

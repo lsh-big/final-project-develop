@@ -26,7 +26,10 @@ function Workspace() {
  const { activeTab } = usePlatform();
  const Page = pages[activeTab] || TrendPage;
  const [reviewCount, setReviewCount] = useState(null);
+ const [completedToday, setCompletedToday] = useState(null);
+ const [processingCount, setProcessingCount] = useState(0);
  const [reviewVersion, setReviewVersion] = useState(0);
+ const [summaryVersion, setSummaryVersion] = useState(0);
  const reviewChannel = useRef(null);
  useEffect(() => {
    if (historyWindow) document.title = '처리 이력 | DataPulse AI';
@@ -52,13 +55,27 @@ function Workspace() {
    };
  }, []);
  useEffect(() => {
+   if (publicDemo || activeTab !== 'doc-ai' || historyWindow || inboxWindow || priceWindow || mailWindow || peerWindow) return;
+   const timer = window.setInterval(() => setSummaryVersion((version) => version + 1), 60_000);
+   return () => window.clearInterval(timer);
+ }, [activeTab]);
+ useEffect(() => {
    if (publicDemo) return;
    const abort = new AbortController();
-   request('/api/v1/documents/review-count', { signal: abort.signal })
-     .then(({ count }) => { if (!abort.signal.aborted) setReviewCount(count); })
-     .catch(() => { if (!abort.signal.aborted) setReviewCount(null); });
+   const summary = activeTab === 'doc-ai' ? '?include_completed=true' : '';
+   request(`/api/v1/documents/review-count${summary}`, { signal: abort.signal })
+     .then(({ count, completed_today }) => {
+       if (abort.signal.aborted) return;
+       setReviewCount(count);
+       setCompletedToday(completed_today ?? null);
+     })
+     .catch(() => {
+       if (abort.signal.aborted) return;
+       setReviewCount(null);
+       setCompletedToday(null);
+     });
    return () => abort.abort();
- }, [activeTab, reviewVersion]);
+ }, [activeTab, reviewVersion, summaryVersion]);
  if (peerWindow) {
    return <main className="mx-auto min-h-screen max-w-[1440px] bg-slate-50 px-4 py-6 text-slate-900 sm:px-6">
      <PeerPerformance />
@@ -94,11 +111,12 @@ function Workspace() {
    </main>;
  }
  return <div className="min-h-screen bg-slate-50 text-slate-900">
-   <TopNavAndToolbar reviewCount={reviewCount} />
+   <TopNavAndToolbar reviewCount={reviewCount} completedToday={completedToday} processingCount={processingCount} />
    {activeTab !== 'doc-ai' && <div role="note" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs text-amber-900">데모 모드 · 뉴스·시세·AI·OCR·로그인·자동화는 시뮬레이션입니다. 실제 API·DB에는 연결되지 않습니다.</div>}
    <main className={activeTab === 'dashboard' ? '' : 'mx-auto max-w-[1440px] px-4 py-8 sm:px-6'}>
      {activeTab === 'doc-ai'
-       ? <DocumentPage reviewCount={reviewCount} onReviewCountChange={refreshReviewCount} reviewRevision={reviewVersion} />
+       ? <DocumentPage reviewCount={reviewCount} onReviewCountChange={refreshReviewCount} reviewRevision={reviewVersion}
+           onProcessingCountChange={setProcessingCount} />
        : <Page />}
    </main>
    <footer className="border-t border-slate-200 bg-white px-4 py-5 text-xs text-slate-600">

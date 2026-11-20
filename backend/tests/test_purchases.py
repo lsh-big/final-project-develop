@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 from io import BytesIO
 from urllib.parse import urlsplit
 
@@ -184,13 +184,17 @@ def test_concurrent_upload_and_approval_are_idempotent(client, image_format, suf
     assert sheet["K2"].value == 33_000
 
 
-def test_saved_draft_remains_pending_and_can_be_reopened(client):
+def test_saved_draft_remains_pending_and_can_be_reopened(client, monkeypatch):
+    today = datetime(2026, 11, 18)
+    monkeypatch.setattr(purchases, "korea_now", lambda: today)
     image = BytesIO()
     Image.new("RGB", (8, 8)).save(image, format="PNG")
     receipt = client.post("/api/v1/receipts/uploads?filename=test.png", content=image.getvalue()).json()["record"]
     path = f"/api/v1/receipts/{receipt['id']}"
     count_path = "/api/v1/documents/review-count"
+    summary_path = f"{count_path}?include_completed=true"
     assert client.get(count_path).json() == {"count": 1}
+    assert client.get(summary_path).json() == {"count": 1, "completed_today": 0}
     fields = {"vendor": "수정한 거래처", "transaction_date": "", "approval_number": "", "total_amount": None}
     saved = client.put(f"{path}/draft", json={"fields": fields}).json()
     assert saved["status"] == "review"
@@ -202,10 +206,12 @@ def test_saved_draft_remains_pending_and_can_be_reopened(client):
     approved = client.post(f"{path}/approve", json={"fields": complete, "document_type": "receipt"})
     assert approved.status_code == 200
     assert client.get(count_path).json() == {"count": 0}
+    assert client.get(summary_path).json() == {"count": 0, "completed_today": 1}
     assert client.put(f"{path}/draft", json={"fields": fields}).status_code == 409
     assert client.get(path).json()["fields"] == complete
     trashed = client.delete(path).json()
     assert trashed["status"] == "trashed"
+    assert client.get(summary_path).json() == {"count": 0, "completed_today": 0}
     assert client.get("/api/v1/documents/history?status=approved").json() == []
     workbook = load_workbook(BytesIO(client.get("/api/v1/documents/export?status=approved").content))
     assert workbook.active.max_row == 1
@@ -214,6 +220,9 @@ def test_saved_draft_remains_pending_and_can_be_reopened(client):
     assert restored["approved_at"] == approved.json()["approved_at"]
     assert restored["fields"] == complete
     assert client.get(count_path).json() == {"count": 0}
+    assert client.get(summary_path).json() == {"count": 0, "completed_today": 1}
+    monkeypatch.setattr(purchases, "korea_now", lambda: today + timedelta(days=1))
+    assert client.get(summary_path).json() == {"count": 0, "completed_today": 0}
 
 
 def test_trash_hides_record_and_restore_preserves_file_and_draft(client):
